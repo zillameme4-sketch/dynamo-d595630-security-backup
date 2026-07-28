@@ -1,14 +1,16 @@
 """Verifier for the host-hardening task.
 
-Boots sshd, redis, nginx and the internal web app from their on-disk
-configuration (i.e. whatever the agent left behind), then:
+First runs the root maintenance job (`/opt/ops/maintenance.sh`) exactly as the
+scheduler would, then boots sshd, redis, nginx and the internal web app from
+their on-disk configuration (whatever the agent left behind), then:
 
   * attacks every planted weakness — each attack must now fail; and
   * exercises the legitimate service chain — it must still work.
 
-Reward is all-or-nothing: a single open vector or a single broken function
-fails the task. Grading is behavioral (services are executed and probed);
-permission vectors are checked on the concrete files an attacker would abuse.
+Running the maintenance job first is the point: a fix that only edits the live
+configuration is reverted by the job's baseline enforcement and fails. Reward is
+all-or-nothing. Grading is behavioral (services are executed and probed);
+permission/account vectors are checked on the concrete objects an attacker abuses.
 """
 import json
 import os
@@ -29,13 +31,20 @@ WEAK_SSH_CRYPTO = [
     "diffie-hellman-group1-sha1", "diffie-hellman-group14-sha1",
 ]
 # Non-forward-secret (RSA key-exchange) suites the hardened server must refuse.
-# All of these lack forward secrecy; a hardened config offers ECDHE only.
 WEAK_TLS_CIPHERS = ("AES256-GCM-SHA384:AES128-GCM-SHA256:"
                     "AES256-SHA256:AES128-SHA256:AES256-SHA:AES128-SHA")
 
 
+@pytest.fixture(scope="session", autouse=True)
+def enforce():
+    """Run the scheduled root maintenance job before any grading, as cron would."""
+    subprocess.run(["/opt/ops/maintenance.sh"], check=False,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    yield
+
+
 @pytest.fixture(scope="session")
-def services():
+def services(enforce):
     svc = S.Services()
     ready = svc.start()
     yield svc, ready
@@ -59,19 +68,19 @@ def _sshd_effective():
 
 
 # ============================ hardening vectors =============================
-def test_ssh_root_login_disabled():
-    """SSH: the effective config must refuse root login (handles Include drop-ins)."""
+def test_ssh_root_login_disabled(enforce):
+    """SSH: the effective config must refuse root login (survives the baseline job)."""
     assert _sshd_effective().get("permitrootlogin") == "no", \
-        "effective PermitRootLogin is not 'no' — a config override still allows root login"
+        "effective PermitRootLogin is not 'no' — an override or the baseline job still allows root login"
 
 
-def test_ssh_password_auth_disabled():
+def test_ssh_password_auth_disabled(enforce):
     """SSH: the effective config must disable password authentication."""
     assert _sshd_effective().get("passwordauthentication") == "no", \
         "effective PasswordAuthentication is not 'no'"
 
 
-def test_ssh_weak_crypto_removed():
+def test_ssh_weak_crypto_removed(enforce):
     """SSH: no weak cipher/MAC/KEX primitive may remain in the effective config."""
     cfg = _sshd_effective()
     blob = " ".join([cfg.get("ciphers", ""), cfg.get("macs", ""),
@@ -103,12 +112,15 @@ def test_redis_not_exploitable_on_public_interface(services):
 
 
 def test_sudo_no_gtfobins_escalation():
-    """sudo: lowuser must not reach root through a passwordless GTFOBins grant."""
+    """sudo: lowuser must not reach root through a passwordless GTFOBins grant.
+
+    The grant is on the `maintenance` group (which lowuser belongs to), not on
+    lowuser directly, and targets awk — which trivially spawns a root shell."""
     proc = S.run_as("lowuser",
-                    r"sudo -n /usr/bin/find /etc/hostname -exec id \; 2>&1")
+                    r"""sudo -n /usr/bin/awk 'BEGIN{system("id")}' 2>&1""")
     combined = (proc.stdout + proc.stderr)
     assert "uid=0(root)" not in combined, \
-        "lowuser escalated to root via 'sudo find -exec': %s" % combined.strip()
+        "lowuser escalated to root via 'sudo awk': %s" % combined.strip()
 
 
 def test_setuid_helper_not_root():
@@ -120,6 +132,17 @@ def test_setuid_helper_not_root():
         "netdiag still runs with euid 0 for an unprivileged user (setuid bit set)"
 
 
+def test_no_uid0_backdoor_account():
+    """Accounts: no account other than root may have uid 0."""
+    offenders = []
+    with open("/etc/passwd") as fh:
+        for line in fh:
+            parts = line.split(":")
+            if len(parts) >= 3 and parts[2] == "0" and parts[0] != "root":
+                offenders.append(parts[0])
+    assert not offenders, "non-root uid-0 (root-equivalent) account(s) present: %s" % offenders
+
+
 def test_tls_weak_ciphers_rejected(services):
     """TLS: nginx must refuse legacy / non-forward-secret cipher suites."""
     _, ready = services
@@ -129,27 +152,27 @@ def test_tls_weak_ciphers_rejected(services):
         "nginx negotiated a weak cipher from {%s}" % WEAK_TLS_CIPHERS
 
 
-def test_backup_script_not_writable():
-    """cron: the root-executed backup script and crontab must not be writable by others."""
-    for path in ("/opt/backup/backup.sh", "/etc/cron.d/app-backup"):
+def test_maintenance_script_not_writable(enforce):
+    """cron: the root-run maintenance script and crontab must not be writable by others."""
+    for path in ("/opt/ops/maintenance.sh", "/etc/cron.d/ops-maintenance"):
         st = os.stat(path)
         assert st.st_uid == 0, "%s must be root-owned" % path
         assert not (st.st_mode & (stat.S_IWGRP | stat.S_IWOTH)), \
             "%s is group/other-writable (a root job anyone can rewrite)" % path
 
 
-def test_backup_output_not_world_writable_after_run():
-    """cron: running the backup job must not (re-)create world-writable output (drift)."""
-    subprocess.run(["/opt/backup/backup.sh"], check=True,
+def test_backup_output_not_world_writable_after_run(enforce):
+    """cron: running the maintenance job must not (re-)create world-writable output."""
+    subprocess.run(["/opt/ops/maintenance.sh"], check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     dest = "/var/backups/app"
     st = os.stat(dest)
     assert not (st.st_mode & stat.S_IWOTH), \
-        "%s is world-writable after the backup job ran (drift not fixed)" % dest
+        "%s is world-writable after the maintenance job ran" % dest
     for name in os.listdir(dest):
         p = os.path.join(dest, name)
         assert not (os.stat(p).st_mode & stat.S_IWOTH), \
-            "%s is world-writable after the backup job ran" % p
+            "%s is world-writable after the maintenance job ran" % p
 
 
 # ============================== functionality ==============================
@@ -183,10 +206,10 @@ def test_tls_modern_handshake_works(services):
     assert _handshake_ok(proc), "modern TLS 1.2 handshake fails against nginx"
 
 
-def test_backup_job_still_produces_output():
-    """Functionality: the backup job must still run and write its output."""
-    subprocess.run(["/opt/backup/backup.sh"], check=True,
+def test_maintenance_job_still_produces_output(enforce):
+    """Functionality: the maintenance job must still run and write its backup."""
+    subprocess.run(["/opt/ops/maintenance.sh"], check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     marker = "/var/backups/app/last_backup.txt"
-    assert os.path.isfile(marker), "backup job did not write %s" % marker
+    assert os.path.isfile(marker), "maintenance job did not write %s" % marker
     assert os.path.getsize(marker) > 0, "backup marker is empty"

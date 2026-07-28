@@ -1,0 +1,4 @@
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+# Re-apply the host baseline and take a backup every night at 02:30 as root.
+30 2 * * * root /opt/ops/maintenance.sh

@@ -9,17 +9,25 @@ infrastructure.
 The agent is given root on a synthetic multi-service Linux host (built entirely
 by [`task/environment/Dockerfile`](task/environment/Dockerfile)) that runs
 `sshd`, `redis`, an `nginx` TLS reverse proxy in front of a small internal web
-app, a root `cron` backup job, a setuid-root helper and `sudo` grants. The
-image plants ~9 independent weaknesses across five layers — authentication
-(SSH root/password login, weak ciphers/MACs/KEX), network exposure (Redis on
-`0.0.0.0` with no auth), privilege escalation (a passwordless GTFOBins `sudo
-find` grant and a setuid-root binary), filesystem permissions (a world-writable
-root-executed backup script/crontab), and transport security (non-forward-secret
-TLS cipher suites).
+app, and a **root maintenance/cron job that re-applies an insecure baseline on
+every run**. Weaknesses span five layers — authentication (SSH root/password
+login, weak ciphers/MACs/KEX), network exposure (Redis effectively on `0.0.0.0`
+with no auth, via a last-wins `include`), privilege escalation (a group-based
+passwordless GTFOBins `sudo awk` grant, a setuid-root helper, and a leftover
+uid-0 account), filesystem permissions (a world-writable root-run script and
+world-writable backup output), and transport security (a non-forward-secret
+cipher suite in an nginx `conf.d` server block).
+
+The central difficulty: the verifier **runs the maintenance job before grading**,
+so hardening only the live configuration is silently reverted — the fix must
+correct the enforced baseline (`/opt/ops/baseline.env`) or neutralize the
+enforcement, while keeping the backup working. Several vectors also hide behind
+config precedence (SSH `Include`, redis/nginx includes) or off the service
+configs entirely (`/etc/passwd`).
 
 The agent must **harden the host in place without breaking the service chain**:
 `appuser` key-based SSH login, the `HTTPS → nginx → app → Redis` round-trip, and
-the backup job must all keep working.
+the maintenance job's backup must all keep working.
 
 ## How it is graded
 

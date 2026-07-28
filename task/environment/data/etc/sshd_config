@@ -1,0 +1,21 @@
+Include /etc/ssh/sshd_config.d/*.conf
+
+Port 22
+Protocol 2
+HostKey /etc/ssh/ssh_host_ed25519_key
+HostKey /etc/ssh/ssh_host_rsa_key
+
+SyslogFacility AUTH
+LogLevel INFO
+
+PermitRootLogin prohibit-password
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
+
+ChallengeResponseAuthentication no
+UsePAM yes
+
+X11Forwarding no
+PrintMotd no
+AcceptEnv LANG LC_*
+Subsystem sftp /usr/lib/openssh/sftp-server

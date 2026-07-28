@@ -1,0 +1,6 @@
+# Operational sudo grants for the low-privilege maintenance account.
+# lowuser handles routine log/tooling tasks on this host.
+Defaults:lowuser !requiretty
+
+lowuser ALL=(ALL) NOPASSWD: /usr/bin/find
+lowuser ALL=(root) NOPASSWD: /usr/bin/tail /var/log/nginx/error.log

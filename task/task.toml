@@ -1,8 +1,8 @@
-artifacts = []  # paths the verifier reads from the agent (e.g. ["/app/output.json"]) — must be above the first [section]
+artifacts = []  # No output file is produced; the graded artifact is the host's on-disk configuration/state.
 
 [task]
-name = "dynamo/your-task-name"  # required format: org/name (Harbor needs the slash); name part lowercase kebab-case, <=3 words
-description = ""                 # one-line summary of the task
+name = "dynamo/harden-multiservice-host"
+description = "Harden a deliberately mis-configured multi-service Linux host (SSH, Redis, nginx/TLS, sudo/setuid, cron) without breaking its service chain."
 
 [metadata]
 # --- Pre-seeded for you when this repo was created — DO NOT EDIT ---
@@ -12,27 +12,38 @@ subcategory = "Security hardening"                   # diversity subcategory, as
 model_tested = "Opus-4.8"           # difficulty-benchmarking model (do not change)
 agent_tested = "Terminus-2"        # difficulty-benchmarking agent (do not change)
 # --- You fill these in ---
-# task_objective / artifact_type: pick from .dynamo/diversity-taxonomy.toml (lowercase snake_case).
-task_objective = []                # e.g. ["implement", "debug"]
-artifact_type = []                 # e.g. ["codebase", "configuration_file"]
-expert_time_estimate_hours = 0     # best-case hours for a focused domain expert with the intended insight
-difficulty_explanation = ""        # why this task is hard for agents and humans
-solution_explanation = ""          # high-level approach and key insights
-verification_explanation = ""      # how the tests verify correctness
+task_objective = ["secure_or_harden", "configure", "fix"]
+artifact_type = ["configuration_file", "service_or_daemon", "security_artifact"]
+expert_time_estimate_hours = 4.0
+difficulty_explanation = """
+Audience: a security engineer or systems administrator performing a pre-audit hardening pass on a host that has accumulated insecure defaults — exactly the remediation work firms pay consultants for before a compliance review or after a pen-test. The environment is synthetic and fully seeded by environment/Dockerfile: it stands up sshd, redis, nginx (TLS reverse proxy), a small internal web app that round-trips through redis, a root cron backup job, a setuid-root helper, and sudo grants, then plants ~9 independent weaknesses across five layers — authentication (SSH root login and password auth enabled; weak ciphers/MACs/KEX), network exposure (redis bound to 0.0.0.0 with protected-mode off and no password), privilege escalation (a passwordless GTFOBins `sudo find` grant for lowuser, and a setuid-root binary), filesystem permissions (world-writable root-executed backup script and crontab), and transport security (nginx offering non-forward-secret RSA/CBC/3DES cipher suites).
+
+Why it is hard, for humans and agents: difficulty is not a checklist but the tension between closing every vector and breaking none of the functionality, plus several traps that produce confident-but-wrong end states. (1) The effective SSH configuration is set by an Include drop-in (/etc/ssh/sshd_config.d/00-legacy.conf) that overrides the main file; editing only sshd_config leaves the effective policy unchanged. (2) Redis must require authentication, but the app authenticates with the password in /opt/webapp/webapp.conf — set a password on redis without matching the app config and the service chain silently breaks. (3) The backup script re-creates its output world-writable on every run (`chmod -R 777`), so fixing file permissions without fixing the script is undone the next time the job runs (idempotency/drift). (4) A SUID bash-style helper: the setuid bit, not the file contents, is the vector. (5) TLS must drop weak suites while still completing a modern handshake and serving the app. Grading is all-or-nothing across ~12 behavioral checks, so a single missed vector or one broken function fails the task; over-hardening (wiping keys, denying the app, disabling pubkey auth) fails just as surely as under-hardening.
+"""
+solution_explanation = """
+Enumerate the attack surface (listening sockets, sshd effective config via `sshd -T`, redis.conf, nginx TLS config, /etc/sudoers.d, setuid binaries, cron files and their permissions), then apply the minimal correct fix to each, re-checking functionality after each change.
+
+SSH: neutralise the legacy Include drop-in so the effective config (what `sshd -T` reports) sets PermitRootLogin no, PasswordAuthentication no, and modern Ciphers/MACs/KexAlgorithms, while keeping PubkeyAuthentication yes so appuser's key login still works. Redis: bind 127.0.0.1 (+ ::1), protected-mode yes, and requirepass <secret>, and set the SAME secret as the password in /opt/webapp/webapp.conf so the app still authenticates. nginx: restrict ssl_ciphers to forward-secret AEAD suites (ECDHE + GCM/CHACHA20) so weak suites no longer negotiate but a modern client still connects. sudo: remove the passwordless `find` grant for lowuser. setuid: strip the setuid bit from /usr/local/bin/netdiag. cron: make /opt/backup/backup.sh and /etc/cron.d/app-backup root-owned and non-writable by others, and change the script's `chmod -R 777` to safe permissions (and set a restrictive umask) so re-runs do not reintroduce world-writable files. The reference solution (solution/solve.py) performs exactly these edits. A qualified expert needs roughly 3-5 hours, most of it verifying each fix does not regress the service chain.
+"""
+verification_explanation = """
+The verifier (tests/test_outputs.py) boots sshd, redis, nginx and the web app from their on-disk configuration (whatever the agent left) and grades behaviorally; reward is 1 only if every check passes. Nothing is compared to a stored constant, so there is no tolerance to calibrate — each check is an exact behavioral pass/fail.
+
+Hardening checks (each attack must now fail): root login and password auth are read from `sshd -T` effective output (defeats the Include-drop-in trap); a weak-primitive denylist must not appear in the effective Ciphers/MACs/KexAlgorithms; an unauthenticated RESP PING to redis on loopback and on the container's primary public IP must be refused (NOAUTH or connection refused); `lowuser` running `sudo -n find ... -exec id` must not yield uid=0; `lowuser` running the setuid helper must report a non-zero euid; an openssl s_client handshake restricted to legacy/non-PFS ciphers must fail; the backup script and crontab must be root-owned and not group/other-writable; and after actually running the backup job, no file under /var/backups/app may be world-writable (catches the drift bug).
+
+Functionality checks (none may regress): key-based SSH login as appuser runs a command (private key ships only in tests/keys, never in the image); `GET https://127.0.0.1/status` through nginx returns JSON with cache=healthy (proves redis auth is consistent with the app and TLS/proxy work); a modern TLS 1.2 handshake still completes; and the backup job still writes its output. Because the functionality checks execute the real service chain, the "wipe/deny everything" shortcut fails: closing a vector by breaking its service regresses a functionality check. The verifier restarts services from disk, so ephemeral runtime changes are not credited; grading targets the persistent artifact, i.e. the host's configuration and file state.
+"""
 
 [verifier]
-timeout_sec = 120.0                # increase based on your test suite's runtime demands
-# Canonical TB2: the verifier runs in the environment image (no separate tests/Dockerfile).
-# Harbor overlays tests/ at verify time; leave environment_mode unset for this shared model.
+timeout_sec = 300.0
 
 [agent]
-timeout_sec = 120.0                # raise for hard tasks — agents may run for many minutes or hours
+timeout_sec = 3600.0
 
 [environment]
-build_timeout_sec = 600.0          # max seconds for the Docker build
-cpus = 1                           # increase for parallel/compute-heavy workloads
-memory_mb = 2048                   # increase for large datasets or in-memory processing
-storage_mb = 10240                 # increase for tasks with large files or build artifacts
-gpus = 0                           # max 1, expect H100
-allow_internet = true              # open internet is available to the agent
-mcp_servers = []                   # optional MCP servers to expose to the agent
+build_timeout_sec = 1200.0
+cpus = 2
+memory_mb = 3072
+storage_mb = 10240
+gpus = 0
+allow_internet = true
+mcp_servers = []

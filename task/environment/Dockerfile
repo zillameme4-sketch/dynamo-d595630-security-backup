@@ -11,7 +11,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # System packages + verifier deps (pytest), all baked at build time and pinned.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         openssh-server redis-server nginx sudo cron openssl gcc libc6-dev \
-        iproute2 procps curl ca-certificates python3 python3-pip \
+        iproute2 procps curl ca-certificates libcap2-bin perl python3 python3-pip \
     && pip install --no-cache-dir --break-system-packages pytest==8.4.1 pytest-json-ctrf==0.3.5 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -56,13 +56,24 @@ COPY data/etc/netdiag.c /usr/local/src/netdiag.c
 RUN gcc -O2 -o /usr/local/bin/netdiag /usr/local/src/netdiag.c \
     && chown root:root /usr/local/bin/netdiag && chmod 0755 /usr/local/bin/netdiag
 
+# --- ops perl helper (a diagnostics copy of perl; its capability is applied
+#     by the baseline, the same way the setuid bit is applied to netdiag) -----
+RUN install -o root -g root -m 0755 /usr/bin/perl /usr/local/bin/opsperl
+
 # --- Maintenance job + baseline ------------------------------------------
-RUN mkdir -p /opt/ops
+# The vendored baseline.env.dist is the "source of truth" the job reconciles the
+# active baseline against; the manifest records the active baseline's checksum.
+RUN mkdir -p /opt/ops /usr/share/ops /var/lib/ops
 COPY data/ops/maintenance.sh /opt/ops/maintenance.sh
+COPY data/ops/collect-logs.sh /opt/ops/collect-logs.sh
 COPY data/ops/baseline.env /opt/ops/baseline.env
+COPY data/ops/baseline.env /usr/share/ops/baseline.env.dist
 COPY data/etc/ops-maintenance.cron /etc/cron.d/ops-maintenance
-RUN chmod 0644 /etc/cron.d/ops-maintenance && chmod 0644 /opt/ops/baseline.env \
+RUN chmod 0644 /etc/cron.d/ops-maintenance \
+    && chmod 0644 /opt/ops/baseline.env /usr/share/ops/baseline.env.dist \
     && chmod 0777 /opt/ops/maintenance.sh \
+    && chown root:maintenance /opt/ops/collect-logs.sh && chmod 0775 /opt/ops/collect-logs.sh \
+    && sha256sum /opt/ops/baseline.env > /var/lib/ops/baseline.sha256 \
     && /opt/ops/maintenance.sh
 
 WORKDIR /app

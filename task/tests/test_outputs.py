@@ -132,6 +132,57 @@ def test_setuid_helper_not_root():
         "netdiag still runs with euid 0 for an unprivileged user (setuid bit set)"
 
 
+def test_no_file_capability_privesc(enforce):
+    """SUID-equivalent: a Linux file capability must not let lowuser reach root.
+
+    `find -perm -4000` does not reveal capabilities, so a cap_setuid binary is
+    an easy vector to miss. The ops perl copy carries cap_setuid unless the
+    baseline stops re-applying it *and* the live capability is cleared."""
+    proc = S.run_as("lowuser",
+                    r'''/usr/local/bin/opsperl -e '$>=0;$<=0;exec "/usr/bin/id"' 2>&1''')
+    out = proc.stdout + proc.stderr
+    assert "uid=0(root)" not in out, \
+        "lowuser escalated to root via a file capability on /usr/local/bin/opsperl: %s" \
+        % out.strip()
+
+
+def test_root_job_helper_not_user_writable(enforce):
+    """A file the root maintenance job executes must not be writable by a
+    non-root user; otherwise lowuser plants code that the job runs as root.
+
+    lowuser (in the ops `maintenance` group) tries to overwrite the collector
+    with a payload, then the root job runs; the payload must not execute as
+    root. State is restored afterwards."""
+    collector = "/opt/ops/collect-logs.sh"
+    sentinel = "/run/collector_pwned"  # /run is root-owned; only root can create here
+    try:
+        os.remove(sentinel)
+    except OSError:
+        pass
+    with open(collector, "rb") as fh:
+        original = fh.read()
+    orig_mode = stat.S_IMODE(os.stat(collector).st_mode)
+    try:
+        plant = ("cat > %s <<'PLEOF'\n"
+                 "#!/bin/bash\n"
+                 "id -u > %s 2>/dev/null || true\n"
+                 "PLEOF\n") % (collector, sentinel)
+        S.run_as("lowuser", plant)
+        subprocess.run(["/opt/ops/maintenance.sh"], check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        pwned = os.path.exists(sentinel)
+    finally:
+        with open(collector, "wb") as fh:
+            fh.write(original)
+        os.chmod(collector, orig_mode)
+        try:
+            os.remove(sentinel)
+        except OSError:
+            pass
+    assert not pwned, \
+        "lowuser planted code in %s, a file the root maintenance job executes as root" % collector
+
+
 def test_no_uid0_backdoor_account():
     """Accounts: no account other than root may have uid 0."""
     offenders = []

@@ -21,15 +21,22 @@ and transport security (a non-forward-secret cipher suite in an nginx `conf.d`
 server block).
 
 The central difficulty: the verifier **runs the maintenance job before grading**,
-so hardening only the live configuration is silently reverted. The job is also
-*self-healing* — it reconciles the active baseline (`/opt/ops/baseline.env`)
-against a vendored source of truth (`/usr/share/ops/baseline.env.dist`) through a
-checksum manifest (`/var/lib/ops/baseline.sha256`) and restores the vendored
-insecure copy on drift, so editing `baseline.env` alone is reverted too. A fix
-has to correct the whole enforcement chain or neutralize the reconcile, while
-keeping the backup working. Several vectors also hide behind config precedence
-(SSH `Include`, redis/nginx includes) or off the service configs entirely
-(`/etc/passwd`, file capabilities).
+so hardening only the live configuration is silently reverted. The job also
+enforces change control *against itself* — it compares the active profile
+(`/etc/ops/host-profile.conf`) against an approved set of settings hard-coded
+inside the job, and on a mismatch rolls the profile back, falling back to
+re-rendering the approved settings when the vendored copy
+(`/usr/share/ops/host-profile.dist`) has been edited too. Mirroring secure values
+across both data files is therefore undone as well: the approved set has to
+agree, or the enforcement has to be neutralized, while the backup keeps working.
+The job additionally owns `/etc/ssh/sshd_config.d` and clears any drop-in it did
+not place, so SSH cannot be hardened with a private drop-in. The profile's keys
+are ops-jargon and deliberately do not map one-to-one onto weaknesses — one knob
+covers the sudo grant, the setuid helper and the file capability together — so
+the vectors must be confirmed by auditing the host (`sshd -T`, `sudo -l`,
+`getcap -r /`, `/etc/passwd`) rather than read off a file. Several also hide
+behind config precedence (SSH `Include`, redis/nginx includes) or off the service
+configs entirely (`/etc/passwd`, file capabilities).
 
 The agent must **harden the host in place without breaking the service chain**:
 `appuser` key-based SSH login, the `HTTPS → nginx → app → Redis` round-trip, and

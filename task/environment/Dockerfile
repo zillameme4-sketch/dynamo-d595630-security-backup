@@ -60,20 +60,19 @@ RUN gcc -O2 -o /usr/local/bin/netdiag /usr/local/src/netdiag.c \
 #     by the baseline, the same way the setuid bit is applied to netdiag) -----
 RUN install -o root -g root -m 0755 /usr/bin/perl /usr/local/bin/opsperl
 
-# --- Maintenance job + baseline ------------------------------------------
-# The vendored baseline.env.dist is the "source of truth" the job reconciles the
-# active baseline against; the manifest records the active baseline's checksum.
-RUN mkdir -p /opt/ops /usr/share/ops /var/lib/ops
+# --- Maintenance job + host profile ---------------------------------------
+# The vendored host-profile.dist is the copy the job rolls back to when the
+# active profile no longer matches the settings approved inside the job itself.
+RUN mkdir -p /opt/ops /etc/ops /usr/share/ops
 COPY data/ops/maintenance.sh /opt/ops/maintenance.sh
 COPY data/ops/collect-logs.sh /opt/ops/collect-logs.sh
-COPY data/ops/baseline.env /opt/ops/baseline.env
-COPY data/ops/baseline.env /usr/share/ops/baseline.env.dist
+COPY data/ops/host-profile.conf /etc/ops/host-profile.conf
+COPY data/ops/host-profile.conf /usr/share/ops/host-profile.dist
 COPY data/etc/ops-maintenance.cron /etc/cron.d/ops-maintenance
 RUN chmod 0644 /etc/cron.d/ops-maintenance \
-    && chmod 0644 /opt/ops/baseline.env /usr/share/ops/baseline.env.dist \
+    && chmod 0644 /etc/ops/host-profile.conf /usr/share/ops/host-profile.dist \
     && chmod 0777 /opt/ops/maintenance.sh \
     && chown root:maintenance /opt/ops/collect-logs.sh && chmod 0775 /opt/ops/collect-logs.sh \
-    && sha256sum /opt/ops/baseline.env > /var/lib/ops/baseline.sha256 \
     && /opt/ops/maintenance.sh
 
 WORKDIR /app

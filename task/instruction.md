@@ -18,13 +18,13 @@ Harden the host against standard misconfigurations across authentication, networ
 All of the following are graded pass/fail and must hold together, and must still hold after the maintenance job has run.
 
 Security — each of these must be closed:
-- Remote root login and password-based SSH authentication are refused, and the SSH server offers no weak cipher, MAC, or key-exchange algorithm.
+- Remote root login and password-based SSH authentication are refused — for every connection the server would actually accept, not just as a global default — and the SSH server offers no weak cipher, MAC, or key-exchange algorithm.
 - The Redis cache cannot be used without authentication, and it is not reachable unauthenticated on the host's public network interface.
 - `lowuser` cannot escalate to root — through sudo, through any setuid-root program, through any Linux file capability, through any file that a privileged (root) scheduled job executes or could be made to execute in its place, or through any other account.
 - No account other than root has uid 0.
 - The maintenance script, its crontab, and any helper the maintenance job runs cannot be modified by non-root users, and running the maintenance job leaves no world-writable files behind.
 - nginx negotiates only strong, forward-secret cipher suites, and the app is not served over plaintext HTTP.
-- The maintenance log bundle stays readable only to the ops group — widening it to everyone is not an acceptable way to preserve access.
+- The maintenance log bundle is readable only by the ops group.
 
 Functionality — none of these may regress:
 - `appuser` can still log in over SSH with its existing key and run a command.

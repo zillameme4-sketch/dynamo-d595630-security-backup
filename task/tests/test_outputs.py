@@ -55,9 +55,15 @@ def _handshake_ok(proc):
     return "-----BEGIN CERTIFICATE-----" in proc.stdout
 
 
-def _sshd_effective():
-    p = subprocess.run(["sshd", "-T", "-f", "/etc/ssh/sshd_config"],
-                       capture_output=True, text=True)
+def _sshd_effective(connection=None):
+    """Effective sshd config. Without `connection` this is the global policy,
+    which is what `sshd -T` alone reports; with it, Match blocks are evaluated
+    the way they would be for a real login."""
+    argv = ["sshd", "-T"]
+    if connection:
+        argv += ["-C", connection]
+    argv += ["-f", "/etc/ssh/sshd_config"]
+    p = subprocess.run(argv, capture_output=True, text=True)
     assert p.returncode == 0, "sshd rejected the configuration:\n%s" % p.stderr
     cfg = {}
     for line in p.stdout.splitlines():
@@ -78,6 +84,22 @@ def test_ssh_password_auth_disabled(enforce):
     """SSH: the effective config must disable password authentication."""
     assert _sshd_effective().get("passwordauthentication") == "no", \
         "effective PasswordAuthentication is not 'no'"
+
+
+def test_ssh_password_auth_not_reenabled_per_connection(enforce):
+    """SSH: no Match block may hand password authentication back for the
+    connections that actually happen.
+
+    `sshd -T` on its own reports the global policy and skips Match blocks
+    entirely, so a config that reads as hardened can still accept passwords from
+    a whole address range. The policy is re-read here the way sshd resolves it
+    for a real login."""
+    cfg = _sshd_effective("user=lowuser,host=probe.internal,addr=10.0.0.5")
+    assert cfg.get("passwordauthentication") == "no", \
+        ("password authentication is still offered to real connections — a Match "
+         "block re-enables it even though the global policy reads as disabled")
+    assert cfg.get("permitrootlogin") == "no", \
+        "root login is still offered to real connections via a Match block"
 
 
 def test_ssh_weak_crypto_removed(enforce):

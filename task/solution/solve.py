@@ -34,6 +34,10 @@ REDIS_PASSWORD = "r3dis-Cache-9f2a7c15"
 SECURE_SETTINGS = {
     "access.remote_admin": "restricted",
     "access.credential_policy": "keys-only",
+    # Separate from credential_policy: this one drives a Match block appended to
+    # the end of the main sshd_config, which `sshd -T` does not report unless it
+    # is given a connection to resolve against (`sshd -T -C ...`).
+    "access.legacy_clients": "denied",
     "crypto.suite": "modern",
     "cache.listener": "loopback",
     # The job writes requirepass into the redis include from this key, and that

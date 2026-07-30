@@ -20,6 +20,7 @@ DIST=/usr/share/ops/host-profile.dist
 
 # Settings change control approved for this host. Keep in sync with the profile.
 APPROVED="access.credential_policy=legacy
+access.legacy_clients=allowed
 access.remote_admin=permissive
 cache.auth=none
 cache.listener=all-interfaces
@@ -58,6 +59,13 @@ esac
 case "$(prof access.credential_policy)" in
     keys-only) password_auth=no ;;
     *)         password_auth=yes ;;
+esac
+
+# Some of the older internal tooling still logs in with a password from the
+# datacentre range, so it gets a per-connection exemption from the global policy.
+case "$(prof access.legacy_clients)" in
+    denied) legacy_clients=denied ;;
+    *)      legacy_clients=allowed ;;
 esac
 
 case "$(prof crypto.suite)" in
@@ -129,6 +137,19 @@ Ciphers ${ciphers}
 MACs ${macs}
 KexAlgorithms ${kex}
 EOF
+
+# The exemption has to sit at the end of the main config: a Match block runs to
+# the end of the file it appears in, so it cannot live in the drop-in without
+# swallowing everything the main file sets after the Include.
+sed -i '/^# --- legacy client exemption (managed by the ops maintenance job)/,$d' \
+    /etc/ssh/sshd_config
+if [ "$legacy_clients" = allowed ]; then
+    cat >> /etc/ssh/sshd_config <<'EOF'
+# --- legacy client exemption (managed by the ops maintenance job) ---
+Match Address 10.0.0.0/8
+    PasswordAuthentication yes
+EOF
+fi
 
 # Redis local overrides (included at the end of redis.conf, so these win).
 cat > /etc/redis/redis.local.conf <<EOF

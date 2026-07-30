@@ -22,6 +22,14 @@ permissions (a world-writable root-run script and world-writable backup output),
 and transport security (a non-forward-secret cipher suite in an nginx `conf.d`
 server block, plus a legacy plaintext `:80` block still proxying the same app).
 
+The SSH password policy is enforced twice: alongside the global setting in the
+drop-in, the job appends a `Match Address 10.0.0.0/8` block to the end of the
+main `sshd_config` that hands password authentication back for that range.
+`sshd -T` — how every auditor checks this — reports only the global policy and
+skips `Match` blocks, so the config reads as hardened while real logins are still
+offered a password. Resolving it needs `sshd -T -C user=…,addr=…`, and closing it
+needs a profile knob separate from the one that sets the global policy.
+
 The Redis credential is the sharpest of them: the job renders `requirepass` into
 the last-wins include from a profile key that ships as `none`, i.e.
 `requirepass ""`, and an empty `requirepass` in a later include **silently
@@ -65,7 +73,7 @@ bundle must all keep working.
 [`task/tests/test_outputs.py`](task/tests/test_outputs.py) boots every service
 from its on-disk configuration and grades behaviorally: it *attacks* each planted
 weakness (each attack must now fail) and *exercises* the real service chain (none
-may regress). All 21 checks must pass — reward is all-or-nothing, so partial
+may regress). All 22 checks must pass — reward is all-or-nothing, so partial
 remediation and over-hardening (wiping keys, denying the app, gutting the
 maintenance backup) both fail. Closing a vector by removing the vulnerable object
 outright is accepted where it genuinely closes it. The reference solution is

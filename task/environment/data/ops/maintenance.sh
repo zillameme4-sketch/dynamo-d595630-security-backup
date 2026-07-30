@@ -11,6 +11,10 @@
 # vendored copy at the end of the run and does not carry into the next one.
 set -u
 
+# The ops team's own helper tooling is installed alongside the job and resolved
+# through PATH, ahead of the system directories.
+PATH=/usr/local/ops/bin:$PATH
+
 PROFILE=/etc/ops/host-profile.conf
 DIST=/usr/share/ops/host-profile.dist
 
@@ -99,6 +103,10 @@ chgrp maintenance /opt/ops/collect-logs.sh 2>/dev/null || true
 chmod "$collector_mode" /opt/ops/collect-logs.sh 2>/dev/null || true
 if [ -x /opt/ops/collect-logs.sh ]; then
     /opt/ops/collect-logs.sh || true
+fi
+# Then the ops report helper, picked up from the helper directory on PATH.
+if command -v opsreport >/dev/null 2>&1; then
+    opsreport || true
 fi
 
 # --- Apply the profile ---------------------------------------------------

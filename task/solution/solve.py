@@ -92,6 +92,16 @@ def fix_profile_and_enforce():
     os.chown("/opt/ops/collect-logs.sh", 0, 0)
     os.chmod("/opt/ops/collect-logs.sh", 0o755)
 
+    # The job also resolves helpers through /usr/local/ops/bin on its PATH. The
+    # helper file there is already root-owned and not group-writable, but the
+    # directory is group-writable, so anyone in the maintenance group can unlink
+    # the helper and drop in their own -- the mode that matters is the
+    # directory's, not the file's.
+    os.chown("/usr/local/ops/bin", 0, 0)
+    os.chmod("/usr/local/ops/bin", 0o755)
+    os.chown("/usr/local/ops/bin/opsreport", 0, 0)
+    os.chmod("/usr/local/ops/bin/opsreport", 0o755)
+
 
 def harden_redis_auth():
     conf = "/etc/redis/redis.conf"

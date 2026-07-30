@@ -15,7 +15,9 @@ login, weak ciphers/MACs/KEX), network exposure (Redis effectively on `0.0.0.0`
 with no auth, via a last-wins `include`), privilege escalation (a group-based
 passwordless GTFOBins `sudo awk` grant, a setuid-root helper, a `cap_setuid+ep`
 file capability that a `find -perm -4000` sweep never reveals, a group-writable
-helper script the root job executes, and a leftover uid-0 account), filesystem
+helper script the root job executes, a root-owned helper on the job's PATH living
+in a group-writable *directory* — the file's own mode looks clean, so hardening
+it does not close the hole — and a leftover uid-0 account), filesystem
 permissions (a world-writable root-run script and world-writable backup output),
 and transport security (a non-forward-secret cipher suite in an nginx `conf.d`
 server block).
@@ -47,7 +49,7 @@ the maintenance job's backup must all keep working.
 [`task/tests/test_outputs.py`](task/tests/test_outputs.py) boots every service
 from its on-disk configuration and grades behaviorally: it *attacks* each planted
 weakness (each attack must now fail) and *exercises* the real service chain (none
-may regress). All 17 checks must pass — reward is all-or-nothing, so partial
+may regress). All 18 checks must pass — reward is all-or-nothing, so partial
 remediation and over-hardening (wiping keys, denying the app, gutting the
 maintenance backup) both fail. Closing a vector by removing the vulnerable object
 outright is accepted where it genuinely closes it. The reference solution is

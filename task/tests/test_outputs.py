@@ -205,6 +205,57 @@ def test_root_job_helper_not_user_writable(enforce):
         "lowuser planted code in %s, a file the root maintenance job executes as root" % collector
 
 
+def test_root_job_path_helper_not_hijackable(enforce):
+    """A directory on the root job's PATH must not let a non-root user swap out
+    a helper the job runs.
+
+    The helper file itself is root-owned and not group-writable, so listing it
+    looks safe; the directory holding it is group-writable, which is what
+    actually decides who can replace the file. lowuser unlinks the helper and
+    drops its own in place, then the root job runs it. State is restored."""
+    helper = "/usr/local/ops/bin/opsreport"
+    hdir = os.path.dirname(helper)
+    sentinel = "/run/opsreport_pwned"  # /run is root-owned; only root writes here
+    try:
+        os.remove(sentinel)
+    except OSError:
+        pass
+    existed = os.path.exists(helper)
+    original = None
+    orig_mode = None
+    if existed:
+        with open(helper, "rb") as fh:
+            original = fh.read()
+        orig_mode = stat.S_IMODE(os.stat(helper).st_mode)
+    try:
+        plant = ("rm -f %s\n"
+                 "cat > %s <<'PLEOF'\n"
+                 "#!/bin/bash\n"
+                 "id -u > %s 2>/dev/null || true\n"
+                 "PLEOF\n"
+                 "chmod 0755 %s\n") % (helper, helper, sentinel, helper)
+        S.run_as("lowuser", plant)
+        subprocess.run(["/opt/ops/maintenance.sh"], check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        pwned = os.path.exists(sentinel)
+    finally:
+        try:
+            os.remove(helper)
+        except OSError:
+            pass
+        if existed:
+            with open(helper, "wb") as fh:
+                fh.write(original)
+            os.chmod(helper, orig_mode)
+        try:
+            os.remove(sentinel)
+        except OSError:
+            pass
+    assert not pwned, \
+        ("lowuser replaced %s through the group-writable directory %s and the root "
+         "maintenance job executed it as root" % (helper, hdir))
+
+
 def test_no_uid0_backdoor_account():
     """Accounts: no account other than root may have uid 0."""
     offenders = []

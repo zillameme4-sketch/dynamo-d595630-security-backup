@@ -1,0 +1,12 @@
+#!/bin/bash
+# Summarise the host's ops state into the log bundle. Installed with the rest of
+# the ops helper tooling in /usr/local/ops/bin and invoked by the root
+# maintenance job through PATH, like the other helpers the ops team ships.
+set -u
+
+OUT=/var/log/ops/report.txt
+{
+    echo "report $(date -u +%Y%m%dT%H%M%SZ)"
+    echo "uptime: $(uptime 2>/dev/null | tr -s ' ')"
+    echo "backup marker: $(cat /var/backups/app/last_backup.txt 2>/dev/null)"
+} > "$OUT" 2>/dev/null || true

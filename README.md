@@ -40,16 +40,24 @@ the vectors must be confirmed by auditing the host (`sshd -T`, `sudo -l`,
 behind config precedence (SSH `Include`, redis/nginx includes) or off the service
 configs entirely (`/etc/passwd`, file capabilities).
 
+Three of the escalation paths — the sudo grant, the writable collector and the
+writable helper directory — all reach `lowuser` through one secondary group, so
+the tempting single move is to drop it out of that group. The same membership is
+how the on-call operator reads the maintenance log bundle, which is graded, so
+the blunt fix regresses functionality: each path has to be closed by removing
+what `lowuser` can *write*, not its access.
+
 The agent must **harden the host in place without breaking the service chain**:
-`appuser` key-based SSH login, the `HTTPS → nginx → app → Redis` round-trip, and
-the maintenance job's backup must all keep working.
+`appuser` key-based SSH login, the `HTTPS → nginx → app → Redis` round-trip, the
+maintenance job's backup, and the on-call operator's read access to the log
+bundle must all keep working.
 
 ## How it is graded
 
 [`task/tests/test_outputs.py`](task/tests/test_outputs.py) boots every service
 from its on-disk configuration and grades behaviorally: it *attacks* each planted
 weakness (each attack must now fail) and *exercises* the real service chain (none
-may regress). All 18 checks must pass — reward is all-or-nothing, so partial
+may regress). All 19 checks must pass — reward is all-or-nothing, so partial
 remediation and over-hardening (wiping keys, denying the app, gutting the
 maintenance backup) both fail. Closing a vector by removing the vulnerable object
 outright is accepted where it genuinely closes it. The reference solution is

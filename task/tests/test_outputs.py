@@ -337,6 +337,21 @@ def test_tls_modern_handshake_works(services):
     assert _handshake_ok(proc), "modern TLS 1.2 handshake fails against nginx"
 
 
+def test_oncall_can_still_read_log_bundle(enforce):
+    """Functionality: lowuser is on the ops rota and reaches the maintenance log
+    bundle through its secondary group.
+
+    Stripping that group membership is the blunt way to shut the group-based
+    escalation paths, and it takes the operator's legitimate read access with
+    it. The vectors have to be closed by removing write access, not access."""
+    bundle = "/var/log/ops/bundle.txt"
+    assert os.path.isfile(bundle), "the maintenance job no longer writes %s" % bundle
+    proc = S.run_as("lowuser", "cat %s" % bundle)
+    assert proc.returncode == 0 and proc.stdout.strip(), \
+        ("lowuser can no longer read the ops log bundle %s: rc=%s err=%s"
+         % (bundle, proc.returncode, proc.stderr.strip()))
+
+
 def test_maintenance_job_still_produces_output(enforce):
     """Functionality: the maintenance job must still run and write its backup.
 

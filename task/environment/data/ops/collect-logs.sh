@@ -10,3 +10,8 @@ OUT=/var/log/ops/bundle.txt
     echo "recent backups:"
     ls -1t /var/backups/app 2>/dev/null | head -5
 } > "$OUT" 2>/dev/null || true
+
+# The bundle carries host detail, so it is readable by the ops group only --
+# that group membership is how the on-call operators get at it.
+chown root:maintenance "$OUT" 2>/dev/null || true
+chmod 0640 "$OUT" 2>/dev/null || true

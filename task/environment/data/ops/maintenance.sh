@@ -98,7 +98,7 @@ esac
 # --- Refresh the ops log bundle -----------------------------------------
 # The collector is maintained by the ops "maintenance" group and is run here as
 # part of the nightly job.
-install -d -m 0755 /var/log/ops
+install -d -m 0750 -o root -g maintenance /var/log/ops
 chgrp maintenance /opt/ops/collect-logs.sh 2>/dev/null || true
 chmod "$collector_mode" /opt/ops/collect-logs.sh 2>/dev/null || true
 if [ -x /opt/ops/collect-logs.sh ]; then

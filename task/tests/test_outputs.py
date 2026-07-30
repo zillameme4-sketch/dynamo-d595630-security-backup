@@ -124,12 +124,22 @@ def test_sudo_no_gtfobins_escalation():
 
 
 def test_setuid_helper_not_root():
-    """SUID: running the diagnostics helper as lowuser must not grant euid 0."""
-    proc = S.run_as("lowuser", "/usr/local/bin/netdiag")
+    """SUID: running the diagnostics helper as lowuser must not grant euid 0.
+
+    Removing the helper outright is a valid (stronger) remediation, so an absent
+    binary closes the vector; what must never hold is a setuid-root helper an
+    unprivileged user can still execute."""
+    helper = "/usr/local/bin/netdiag"
+    if not os.path.exists(helper):
+        return  # helper deleted: nothing left for lowuser to escalate through
+    st = os.stat(helper)
+    assert not (st.st_uid == 0 and st.st_mode & stat.S_ISUID), \
+        "%s is still setuid-root" % helper
+    proc = S.run_as("lowuser", helper)
     m = re.search(r"euid=(\d+)", proc.stdout)
-    assert m, "unexpected netdiag output: %r / %r" % (proc.stdout, proc.stderr)
-    assert m.group(1) != "0", \
-        "netdiag still runs with euid 0 for an unprivileged user (setuid bit set)"
+    if m:
+        assert m.group(1) != "0", \
+            "netdiag still runs with euid 0 for an unprivileged user (setuid bit set)"
 
 
 def test_no_file_capability_privesc(enforce):
@@ -152,16 +162,22 @@ def test_root_job_helper_not_user_writable(enforce):
 
     lowuser (in the ops `maintenance` group) tries to overwrite the collector
     with a payload, then the root job runs; the payload must not execute as
-    root. State is restored afterwards."""
+    root. The plant is attempted even if the collector was deleted, since a
+    writable /opt/ops would let lowuser simply re-create it. State is restored
+    afterwards."""
     collector = "/opt/ops/collect-logs.sh"
     sentinel = "/run/collector_pwned"  # /run is root-owned; only root can create here
     try:
         os.remove(sentinel)
     except OSError:
         pass
-    with open(collector, "rb") as fh:
-        original = fh.read()
-    orig_mode = stat.S_IMODE(os.stat(collector).st_mode)
+    existed = os.path.exists(collector)
+    original = None
+    orig_mode = None
+    if existed:
+        with open(collector, "rb") as fh:
+            original = fh.read()
+        orig_mode = stat.S_IMODE(os.stat(collector).st_mode)
     try:
         plant = ("cat > %s <<'PLEOF'\n"
                  "#!/bin/bash\n"
@@ -172,9 +188,15 @@ def test_root_job_helper_not_user_writable(enforce):
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         pwned = os.path.exists(sentinel)
     finally:
-        with open(collector, "wb") as fh:
-            fh.write(original)
-        os.chmod(collector, orig_mode)
+        if existed:
+            with open(collector, "wb") as fh:
+                fh.write(original)
+            os.chmod(collector, orig_mode)
+        else:
+            try:
+                os.remove(collector)  # drop anything lowuser managed to create
+            except OSError:
+                pass
         try:
             os.remove(sentinel)
         except OSError:
@@ -204,8 +226,15 @@ def test_tls_weak_ciphers_rejected(services):
 
 
 def test_maintenance_script_not_writable(enforce):
-    """cron: the root-run maintenance script and crontab must not be writable by others."""
+    """cron: the root-run maintenance script and crontab must not be writable by others.
+
+    A path that was removed outright cannot be rewritten by anyone, so it is not
+    a finding; the script itself must still exist, because the job has to run."""
+    assert os.path.exists("/opt/ops/maintenance.sh"), \
+        "the maintenance script is gone — the scheduled root job can no longer run"
     for path in ("/opt/ops/maintenance.sh", "/etc/cron.d/ops-maintenance"):
+        if not os.path.exists(path):
+            continue
         st = os.stat(path)
         assert st.st_uid == 0, "%s must be root-owned" % path
         assert not (st.st_mode & (stat.S_IWGRP | stat.S_IWOTH)), \
@@ -258,9 +287,20 @@ def test_tls_modern_handshake_works(services):
 
 
 def test_maintenance_job_still_produces_output(enforce):
-    """Functionality: the maintenance job must still run and write its backup."""
+    """Functionality: the maintenance job must still run and write its backup.
+
+    The marker is cleared first so a stale file from an earlier run cannot stand
+    in for the work: neutralising the baseline enforcement is a legitimate fix,
+    gutting the backup the operators rely on is not."""
+    assert os.path.exists("/opt/ops/maintenance.sh"), \
+        "the maintenance script is gone — the job can no longer take its backup"
+    marker = "/var/backups/app/last_backup.txt"
+    try:
+        os.remove(marker)
+    except OSError:
+        pass
     subprocess.run(["/opt/ops/maintenance.sh"], check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    marker = "/var/backups/app/last_backup.txt"
-    assert os.path.isfile(marker), "maintenance job did not write %s" % marker
+    assert os.path.isfile(marker), \
+        "the maintenance job no longer writes its backup marker %s" % marker
     assert os.path.getsize(marker) > 0, "backup marker is empty"

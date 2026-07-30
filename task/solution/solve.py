@@ -36,6 +36,10 @@ SECURE_SETTINGS = {
     "access.credential_policy": "keys-only",
     "crypto.suite": "modern",
     "cache.listener": "loopback",
+    # The job writes requirepass into the redis include from this key, and that
+    # include is read last -- so a requirepass added straight to redis.conf is
+    # silently overridden by the profile's "none" unless this is set too.
+    "cache.auth": REDIS_PASSWORD,
     "tools.operator_privs": "standard",
     "paths.shared_mode": "strict",
 }
@@ -147,6 +151,12 @@ def harden_nginx():
                   "ssl_prefer_server_ciphers on;", text)
     with open(conf, "w") as fh:
         fh.write(text)
+    # A legacy server block still proxies the same app over plaintext HTTP, which
+    # a stronger cipher list does nothing about. Retire it.
+    try:
+        os.remove("/etc/nginx/conf.d/legacy-http.conf")
+    except OSError:
+        pass
 
 
 def remove_uid0_backdoor():

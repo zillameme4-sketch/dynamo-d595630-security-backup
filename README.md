@@ -20,7 +20,15 @@ in a group-writable *directory* — the file's own mode looks clean, so hardenin
 it does not close the hole — and a leftover uid-0 account), filesystem
 permissions (a world-writable root-run script and world-writable backup output),
 and transport security (a non-forward-secret cipher suite in an nginx `conf.d`
-server block).
+server block, plus a legacy plaintext `:80` block still proxying the same app).
+
+The Redis credential is the sharpest of them: the job renders `requirepass` into
+the last-wins include from a profile key that ships as `none`, i.e.
+`requirepass ""`, and an empty `requirepass` in a later include **silently
+disables** an earlier one. Adding `requirepass` to `redis.conf` therefore leaves
+the cache open while the file the agent reads back still shows the password — and
+it breaks the app at the same time, since the app then authenticates against a
+server that is not asking for a password.
 
 The central difficulty: the verifier **runs the maintenance job before grading**,
 so hardening only the live configuration is silently reverted. The job also
@@ -57,7 +65,7 @@ bundle must all keep working.
 [`task/tests/test_outputs.py`](task/tests/test_outputs.py) boots every service
 from its on-disk configuration and grades behaviorally: it *attacks* each planted
 weakness (each attack must now fail) and *exercises* the real service chain (none
-may regress). All 19 checks must pass — reward is all-or-nothing, so partial
+may regress). All 21 checks must pass — reward is all-or-nothing, so partial
 remediation and over-hardening (wiping keys, denying the app, gutting the
 maintenance backup) both fail. Closing a vector by removing the vulnerable object
 outright is accepted where it genuinely closes it. The reference solution is

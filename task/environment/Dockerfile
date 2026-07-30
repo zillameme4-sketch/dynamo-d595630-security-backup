@@ -54,8 +54,9 @@ RUN chown -R appuser:appuser /opt/webapp \
 # --- nginx (TLS reverse proxy) -------------------------------------------
 COPY data/etc/nginx.conf /etc/nginx/nginx.conf
 COPY data/etc/nginx-app.conf /etc/nginx/conf.d/app.conf
-RUN chown root:root /etc/nginx/nginx.conf /etc/nginx/conf.d/app.conf \
-    && chmod 0644 /etc/nginx/nginx.conf /etc/nginx/conf.d/app.conf \
+COPY data/etc/nginx-legacy.conf /etc/nginx/conf.d/legacy-http.conf
+RUN chown root:root /etc/nginx/nginx.conf /etc/nginx/conf.d/app.conf /etc/nginx/conf.d/legacy-http.conf \
+    && chmod 0644 /etc/nginx/nginx.conf /etc/nginx/conf.d/app.conf /etc/nginx/conf.d/legacy-http.conf \
     && mkdir -p /etc/nginx/certs \
     && openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
         -keyout /etc/nginx/certs/server.key -out /etc/nginx/certs/server.crt \

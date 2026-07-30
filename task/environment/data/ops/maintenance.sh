@@ -21,6 +21,7 @@ DIST=/usr/share/ops/host-profile.dist
 # Settings change control approved for this host. Keep in sync with the profile.
 APPROVED="access.credential_policy=legacy
 access.remote_admin=permissive
+cache.auth=none
 cache.listener=all-interfaces
 crypto.suite=legacy-interop
 paths.shared_mode=group
@@ -77,6 +78,13 @@ case "$(prof cache.listener)" in
     *)        redis_bind="0.0.0.0";        redis_protected=no ;;
 esac
 
+# The cache secret is part of the profile so the whole host converges on one
+# value. "none" is what this host has always shipped with.
+case "$(prof cache.auth)" in
+    ""|none) redis_auth="" ;;
+    *)       redis_auth="$(prof cache.auth)" ;;
+esac
+
 case "$(prof tools.operator_privs)" in
     standard)
         sudo_grant=""
@@ -126,6 +134,7 @@ EOF
 cat > /etc/redis/redis.local.conf <<EOF
 bind ${redis_bind}
 protected-mode ${redis_protected}
+requirepass "${redis_auth}"
 EOF
 
 # Sudo grants for the maintenance group.

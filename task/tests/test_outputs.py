@@ -276,6 +276,37 @@ def test_tls_weak_ciphers_rejected(services):
         "nginx negotiated a weak cipher from {%s}" % WEAK_TLS_CIPHERS
 
 
+def test_app_not_served_over_plaintext_http(services):
+    """TLS: the app must not also be reachable over plaintext HTTP.
+
+    Hardening the HTTPS cipher list does nothing if a legacy server block still
+    proxies the same app on port 80. Removing the listener, or redirecting it to
+    HTTPS, both close it."""
+    _, ready = services
+    assert ready["nginx"], "nginx did not start from its configuration"
+    for host in ("127.0.0.1", S.primary_ip()):
+        proc = subprocess.run(
+            ["curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}",
+             "--max-time", "5", "http://%s/status" % host],
+            capture_output=True, text=True)
+        code = proc.stdout.strip() or "000"
+        # 000 = nothing listening, 3xx = redirected to TLS, 4xx = not served.
+        # A 2xx or 5xx means the plaintext listener is still proxying the app.
+        assert not (code.startswith("2") or code.startswith("5")), \
+            "the app is still reachable over plaintext HTTP on %s (HTTP %s)" % (host, code)
+
+
+def test_log_bundle_not_readable_outside_ops_group(enforce):
+    """The ops log bundle is group-restricted; widening it to everyone is not a
+    valid way to keep the on-call operator's access working."""
+    bundle = "/var/log/ops/bundle.txt"
+    if not os.path.isfile(bundle):
+        return  # nothing written, nothing to leak
+    proc = S.run_as("appuser", "cat %s" % bundle)
+    assert proc.returncode != 0 and not proc.stdout.strip(), \
+        "appuser, outside the ops group, can read %s" % bundle
+
+
 def test_maintenance_script_not_writable(enforce):
     """cron: the root-run maintenance script and crontab must not be writable by others.
 

@@ -11,7 +11,7 @@ Their configuration is on disk in the usual places under `/etc` and `/opt`. Part
 
 A **root maintenance job** also runs on this host on a schedule. It takes a backup that operators rely on, and it re-applies a saved configuration profile so the box "stays in a known state." **The verifier runs this job as root before it grades.** Treat it as adversarial to sloppy fixes: it has its own idea of which settings are approved and rolls back anything it considers an unreviewed change, and it manages some configuration directories itself, so a fix the job later reverts or discards does not count. Work out what it actually enforces and where that decision is made. Whatever you do must still hold *after* the job has run — including on a second run — and the job must still complete its backup.
 
-Two local accounts exist besides root: `appuser`, which owns the app and is the only account that logs in over SSH (using a key already in its `authorized_keys`), and `lowuser`, an unprivileged account that also belongs to a secondary group used by the ops tooling. Assume an attacker has `lowuser`'s shell and audit every path from there to root — sudo grants, setuid-root programs, Linux file capabilities, anything a privileged job executes that a non-root user could replace, and any other account that is root-equivalent. That group is also how the on-call operators get at the maintenance log bundle, so it has to keep working — close these paths by taking away what `lowuser` can *write*, not by taking away the group.
+Two local accounts exist besides root: `appuser`, which owns the app and is the only account that logs in over SSH (using a key already in its `authorized_keys`), and `lowuser`, an unprivileged account that also belongs to a secondary group used by the ops tooling. Assume an attacker has `lowuser`'s shell and audit every path from there to root — sudo grants, setuid-root programs, Linux file capabilities, anything a privileged job executes that a non-root user could replace, and any other account that is root-equivalent. That group is also how the on-call operators reach the maintenance log bundle, which has to keep working.
 
 Harden the host against standard misconfigurations across authentication, network exposure, privilege escalation, filesystem permissions, and transport security. The specific weaknesses are for you to discover. The verifier restarts every service from its on-disk configuration and actively tries to exploit weaknesses, so runtime-only changes do not count — fix the configuration and files on disk. Services are launched as: `/usr/sbin/sshd`, `redis-server /etc/redis/redis.conf`, `python3 /opt/webapp/app.py` (run as `appuser`), and `nginx -c /etc/nginx/nginx.conf`.
 
@@ -23,7 +23,8 @@ Security — each of these must be closed:
 - `lowuser` cannot escalate to root — through sudo, through any setuid-root program, through any Linux file capability, through any file that a privileged (root) scheduled job executes or could be made to execute in its place, or through any other account.
 - No account other than root has uid 0.
 - The maintenance script, its crontab, and any helper the maintenance job runs cannot be modified by non-root users, and running the maintenance job leaves no world-writable files behind.
-- nginx negotiates only strong, forward-secret cipher suites.
+- nginx negotiates only strong, forward-secret cipher suites, and the app is not served over plaintext HTTP.
+- The maintenance log bundle stays readable only to the ops group — widening it to everyone is not an acceptable way to preserve access.
 
 Functionality — none of these may regress:
 - `appuser` can still log in over SSH with its existing key and run a command.

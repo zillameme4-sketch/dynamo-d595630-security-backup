@@ -278,8 +278,15 @@ def test_root_job_path_helper_not_hijackable(enforce):
          "maintenance job executed it as root" % (helper, hdir))
 
 
-def test_no_uid0_backdoor_account():
-    """Accounts: no account other than root may have uid 0."""
+def test_no_uid0_backdoor_account(enforce):
+    """Accounts: no account other than root may have uid 0, as the host stands
+    after the maintenance job has run.
+
+    The job is run again here so the check reads the state a scheduled run
+    actually leaves behind: removing the account without stopping the job from
+    re-registering it leaves the host clean only until the next run."""
+    subprocess.run(["/opt/ops/maintenance.sh"], check=False,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     offenders = []
     with open("/etc/passwd") as fh:
         for line in fh:
@@ -406,20 +413,26 @@ def test_oncall_can_still_read_log_bundle(enforce):
 
 
 def test_maintenance_job_still_produces_output(enforce):
-    """Functionality: the maintenance job must still run and write its backup.
+    """Functionality: the maintenance job must still take its backup and refresh
+    the log bundle.
 
-    The marker is cleared first so a stale file from an earlier run cannot stand
-    in for the work: neutralising the baseline enforcement is a legitimate fix,
-    gutting the backup the operators rely on is not."""
+    Both outputs are cleared first so a stale file from an earlier run cannot
+    stand in for the work: neutralising the profile enforcement is a legitimate
+    fix, gutting the work the operators rely on is not."""
     assert os.path.exists("/opt/ops/maintenance.sh"), \
         "the maintenance script is gone — the job can no longer take its backup"
     marker = "/var/backups/app/last_backup.txt"
-    try:
-        os.remove(marker)
-    except OSError:
-        pass
+    bundle = "/var/log/ops/bundle.txt"
+    for path in (marker, bundle):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
     subprocess.run(["/opt/ops/maintenance.sh"], check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     assert os.path.isfile(marker), \
         "the maintenance job no longer writes its backup marker %s" % marker
     assert os.path.getsize(marker) > 0, "backup marker is empty"
+    assert os.path.isfile(bundle), \
+        "the maintenance job no longer refreshes the log bundle %s" % bundle
+    assert os.path.getsize(bundle) > 0, "the refreshed log bundle is empty"

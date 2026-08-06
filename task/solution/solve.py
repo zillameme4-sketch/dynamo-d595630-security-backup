@@ -1,21 +1,28 @@
 #!/usr/bin/env python3
 """Reference hardening pass for the multi-service host.
 
-The subtlety: a root maintenance job (/opt/ops/maintenance.sh) re-applies a host
-compatibility profile on every scheduled run, and the verifier runs it during
-grading. Editing only the live configuration is silently reverted. Worse, the
-job compares the active profile (/etc/ops/host-profile.conf) against the set of
-settings approved *inside the job itself* and, on any mismatch, rolls the profile
-back to the vendored copy (/usr/share/ops/host-profile.dist) at the end of the
-run. So mirroring secure values across the profile and the vendored copy is not
-enough either: the approved set in the job has to agree, or the enforcement has
-to be neutralised outright. The job also owns /etc/ssh/sshd_config.d, clearing
-any drop-in it did not place, so SSH cannot be hardened with a private drop-in.
+The subtlety: a root maintenance job (/opt/ops/maintenance.sh -> the `opsd`
+package in /opt/ops) re-applies a host compatibility profile on every scheduled
+run, and the verifier runs it during grading. Editing only the live
+configuration is silently reverted. Worse, opsd.changecontrol holds the SHA-256
+of the profile it considers approved and, on any mismatch, restores the vendored
+copy (/usr/share/ops/host-profile.dist) -- or, if that copy is not approved
+either, the profile this build shipped with. So mirroring secure values across
+the profile and the vendored copy is not enough: the recorded digest has to
+agree, or the reconciliation has to be neutralised outright. opsd also owns
+/etc/ssh/sshd_config.d, clearing any drop-in it did not place, so SSH cannot be
+hardened with a private drop-in.
 
-The profile keys do not map one-to-one onto weaknesses either -- one knob covers
-the sudo grant, the setuid helper and the file capability together -- so the
-vectors have to be confirmed by auditing the host (`sshd -T`, `sudo -l`,
+The profile keys do not map one-to-one onto weaknesses either -- one control
+covers the sudo grant, the setuid helper and the file capability together -- so
+the vectors have to be confirmed by auditing the host (`sshd -T`, `sudo -l`,
 `getcap -r /`, /etc/passwd) rather than read off the file.
+
+The part that survives a correct profile: opsd.inventory reconciles the host
+against what the build vendored *before* it renders anything, and the vendored
+service-account manifest records `toolsvc` at uid 0. Deleting the account -- the
+obvious remediation, and the only one the profile has no control for -- lasts
+until the next run and no further. The manifest is what has to change.
 
 Several weaknesses also hide behind config precedence (a last-wins redis
 `include`, an nginx `conf.d` server block) or off the service configs entirely
@@ -23,6 +30,7 @@ Several weaknesses also hide behind config precedence (a last-wins redis
 reveals, and a group-writable helper the root job executes).
 """
 import configparser
+import hashlib
 import os
 import re
 import stat
@@ -51,6 +59,8 @@ SECURE_SETTINGS = {
 PROFILE = "/etc/ops/host-profile.conf"
 DIST = "/usr/share/ops/host-profile.dist"
 JOB = "/opt/ops/maintenance.sh"
+CHANGECONTROL = "/opt/ops/opsd/changecontrol.py"
+ACCOUNT_MANIFEST = "/usr/share/ops/vendor/service-accounts.tsv"
 
 
 def sh(*argv):
@@ -60,10 +70,10 @@ def sh(*argv):
 
 def fix_profile_and_enforce():
     # Correct the whole enforcement chain so nothing gets rolled back:
-    #   * the active profile the job reads,
-    #   * the vendored copy it rolls back to, and
-    #   * the approved set baked into the job, which decides whether it rolls
-    #     back at all.
+    #   * the active profile opsd reads,
+    #   * the vendored copy it restores from, and
+    #   * the approved digest in opsd.changecontrol, which decides whether it
+    #     restores at all.
     body = ("# Host compatibility profile, applied by the ops maintenance job.\n"
             + "".join("%s = %s\n" % (k, v) for k, v in SECURE_SETTINGS.items()))
     for path in (PROFILE, DIST):
@@ -71,15 +81,17 @@ def fix_profile_and_enforce():
             fh.write(body)
         os.chmod(path, 0o644)
 
-    # The job compares `sort`ed key=value lines, so the approved block has to be
-    # in that exact form.
-    approved = "\n".join(sorted("%s=%s" % kv for kv in SECURE_SETTINGS.items()))
-    with open(JOB) as fh:
-        job = fh.read()
-    job, n = re.subn(r'APPROVED="[^"]*"', 'APPROVED="%s"' % approved, job, count=1)
-    assert n == 1, "could not find the approved set in %s" % JOB
-    with open(JOB, "w") as fh:
-        fh.write(job)
+    # opsd hashes the canonical form of the profile: sorted `key=value` lines,
+    # no whitespace, no comments, no trailing newline.
+    canonical = "\n".join(sorted("%s=%s" % kv for kv in SECURE_SETTINGS.items()))
+    approved = hashlib.sha256(canonical.encode()).hexdigest()
+    with open(CHANGECONTROL) as fh:
+        module = fh.read()
+    module, n = re.subn(r'APPROVED_DIGEST = "[0-9a-f]*"',
+                        'APPROVED_DIGEST = "%s"' % approved, module, count=1)
+    assert n == 1, "could not find the approved digest in %s" % CHANGECONTROL
+    with open(CHANGECONTROL, "w") as fh:
+        fh.write(module)
 
     # Apply the good profile immediately (the scheduled run will keep it so).
     sh(JOB)
@@ -164,8 +176,22 @@ def harden_nginx():
 
 
 def remove_uid0_backdoor():
-    # Any non-root account with uid 0 is a root-equivalent backdoor. Plain
-    # userdel refuses because uid 0 is always "in use" (root), so force it.
+    # Any non-root account with uid 0 is a root-equivalent backdoor. Deleting it
+    # is only half the fix: opsd.inventory re-registers every account in the
+    # vendored manifest at the start of the next run, so an account removed but
+    # left in the manifest comes straight back -- with its uid 0 -- while the
+    # host looks clean in between. Drop it from the record first.
+    keep = []
+    with open(ACCOUNT_MANIFEST) as fh:
+        for line in fh:
+            fields = line.split("\t")
+            if len(fields) >= 4 and fields[0].strip() == "toolsvc":
+                continue
+            keep.append(line)
+    with open(ACCOUNT_MANIFEST, "w") as fh:
+        fh.writelines(keep)
+
+    # Plain userdel refuses because uid 0 is always "in use" (root), so force it.
     sh("userdel", "-f", "toolsvc")
 
 

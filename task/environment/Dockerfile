@@ -73,27 +73,38 @@ RUN chown root:root /usr/local/src/netdiag.c && chmod 0644 /usr/local/src/netdia
 #     by the baseline, the same way the setuid bit is applied to netdiag) -----
 RUN install -o root -g root -m 0755 /usr/bin/perl /usr/local/bin/opsperl
 
-# --- Maintenance job + host profile ---------------------------------------
-# The vendored host-profile.dist is the copy the job rolls back to when the
-# active profile no longer matches the settings approved inside the job itself.
-RUN mkdir -p /opt/ops /etc/ops /usr/share/ops /usr/local/ops/bin
+# --- Maintenance job + ops tooling + host profile --------------------------
+# /opt/ops/opsd is the package the scheduled job runs; maintenance.sh is the
+# wrapper cron invokes. The vendored copies under /usr/share/ops are what the
+# tooling restores from: host-profile.dist for change control, and the rest of
+# vendor/ for the deploy-integrity pass.
+RUN mkdir -p /opt/ops /etc/ops /usr/share/ops/vendor /usr/local/ops/bin
+COPY data/ops/opsd /opt/ops/opsd
 COPY data/ops/maintenance.sh /opt/ops/maintenance.sh
 COPY data/ops/collect-logs.sh /opt/ops/collect-logs.sh
 COPY data/ops/opsreport /usr/local/ops/bin/opsreport
 COPY data/ops/host-profile.conf /etc/ops/host-profile.conf
 COPY data/ops/host-profile.conf /usr/share/ops/host-profile.dist
+COPY data/ops/vendor/service-accounts.tsv /usr/share/ops/vendor/service-accounts.tsv
 COPY data/etc/ops-maintenance.cron /etc/cron.d/ops-maintenance
 # The helper *file* is root-owned and not writable by the group; the directory
 # it lives in was left writable by the ops "maintenance" group long ago, which
 # is what actually decides who can replace the helper the root job executes.
 RUN chown root:root /etc/cron.d/ops-maintenance /etc/ops/host-profile.conf \
-        /usr/share/ops/host-profile.dist /opt/ops/maintenance.sh \
-    && chmod 0644 /etc/cron.d/ops-maintenance \
-    && chmod 0644 /etc/ops/host-profile.conf /usr/share/ops/host-profile.dist \
+        /usr/share/ops/host-profile.dist /usr/share/ops/vendor/service-accounts.tsv \
+        /opt/ops/maintenance.sh \
+    && chmod 0644 /etc/cron.d/ops-maintenance /etc/ops/host-profile.conf \
+        /usr/share/ops/host-profile.dist /usr/share/ops/vendor/service-accounts.tsv \
     && chmod 0777 /opt/ops/maintenance.sh \
+    && find /opt/ops/opsd -type d -exec chown root:root {} + -exec chmod 0755 {} + \
+    && find /opt/ops/opsd -type f -exec chown root:root {} + -exec chmod 0644 {} + \
     && chown root:maintenance /opt/ops/collect-logs.sh && chmod 0775 /opt/ops/collect-logs.sh \
     && chown root:root /usr/local/ops/bin/opsreport && chmod 0755 /usr/local/ops/bin/opsreport \
     && chown root:maintenance /usr/local/ops/bin && chmod 0775 /usr/local/ops/bin \
+    && install -o root -g root -m 0755 /opt/ops/collect-logs.sh /usr/share/ops/vendor/collect-logs.sh \
+    && install -o root -g root -m 0755 /usr/local/ops/bin/opsreport /usr/share/ops/vendor/opsreport \
+    && install -o root -g root -m 0755 /usr/local/bin/netdiag /usr/share/ops/vendor/netdiag \
+    && install -o root -g root -m 0644 /etc/ops/host-profile.conf /usr/share/ops/vendor/host-profile.shipped \
     && /opt/ops/maintenance.sh
 
 WORKDIR /app

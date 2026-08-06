@@ -116,7 +116,10 @@ weakness (each attack must now fail) and *exercises* the real service chain (non
 may regress). All 24 checks must pass — reward is all-or-nothing, so partial
 remediation and over-hardening (wiping keys, denying the app, gutting the
 maintenance backup or the log bundle) both fail. Closing a vector by removing the vulnerable object
-outright is accepted where it genuinely closes it. The reference solution is
+outright is accepted where it genuinely closes it. Every graded path is rejected
+if it is a symlink or resolves outside where it belongs, and the two files a run
+leaves behind are snapshotted before the job runs, so an empty stub or a
+redirected path cannot be papered over by the run that would rewrite it. The reference solution is
 [`task/solution/solve.py`](task/solution/solve.py).
 
 Validated locally: `harbor run -p task --agent oracle` → reward `1.0`;

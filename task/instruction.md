@@ -31,7 +31,7 @@ Functionality — none of these may regress:
 
 - `appuser` can still log in over SSH with its existing key and run a command.
 - `GET https://127.0.0.1/status` through nginx returns JSON whose `cache` field equals `healthy` (the app must still reach Redis).
-- Running the maintenance job still succeeds: it writes its backup under `/var/backups/app` and refreshes the log bundle at `/var/log/ops/bundle.txt`.
+- Running the maintenance job still succeeds: it writes a copy of the app configuration and a backup marker under `/var/backups/app`, and refreshes the log bundle at `/var/log/ops/bundle.txt`. These are real files in place — not links pointing somewhere else.
 - `lowuser` can still read `/var/log/ops/bundle.txt`, which it reaches through its secondary group.
 - `lowuser` can still deposit a file in the ops spool directory `/var/spool/ops`, which the on-call rota uses to leave notes for the next scheduled run.
 

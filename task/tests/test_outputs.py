@@ -22,17 +22,110 @@ import pytest
 
 import servicelib as S
 
-# Unambiguously weak primitives (none appear in modern OpenSSH defaults, so a
-# config that simply reverts to defaults is not penalised).
-WEAK_SSH_CRYPTO = [
-    "hmac-md5", "hmac-md5-96", "hmac-sha1-96",
-    "3des-cbc", "aes128-cbc", "aes256-cbc", "arcfour", "arcfour128",
-    "arcfour256", "blowfish-cbc", "cast128-cbc",
-    "diffie-hellman-group1-sha1", "diffie-hellman-group14-sha1",
-]
-# Non-forward-secret (RSA key-exchange) suites the hardened server must refuse.
-WEAK_TLS_CIPHERS = ("AES256-GCM-SHA384:AES128-GCM-SHA256:"
-                    "AES256-SHA256:AES128-SHA256:AES256-SHA:AES128-SHA")
+
+def _weak_ssh_primitives(cfg):
+    """The weak transport primitives left in an effective sshd configuration.
+
+    Judged by class rather than by a fixed list of names, so a primitive that
+    happens not to be enumerated anywhere is still caught: CBC-mode, RC4 /
+    arcfour, DES / 3DES, Blowfish, CAST and null ciphers; MD5-, RIPEMD-based,
+    truncated (`-96`) and null MACs; and SHA-1 or group1 key exchange. Every
+    one of these is unambiguously weak and none of them appear in the OpenSSH
+    defaults, so a configuration that simply falls back to the distribution
+    default is not penalised.
+    """
+    def entries(key):
+        return [e for e in (cfg.get(key) or "").split(",") if e]
+
+    def base(name):
+        return name.split("@")[0].lower()
+
+    weak = []
+    for name in entries("ciphers"):
+        b = base(name)
+        if (b.endswith("-cbc") or b.startswith(("arcfour", "rc4", "3des", "des-",
+                                                "blowfish", "cast", "idea"))
+                or b == "none"):
+            weak.append(name)
+    for name in entries("macs"):
+        b = base(name)
+        if "md5" in b or "ripemd" in b or b.endswith("-96") or b == "none":
+            weak.append(name)
+    for name in entries("kexalgorithms"):
+        b = base(name)
+        if b.endswith("-sha1") or "group1-" in b or b.endswith("group1") or "rsa1024" in b:
+            weak.append(name)
+    return sorted(set(weak))
+
+
+# The connections the effective SSH policy is resolved for. A Match block that
+# hands password authentication back to one address range does not show up in
+# plain `sshd -T` output at all, and an exemption written for some other range
+# is the same weakness — so the policy is read the way sshd resolves it for a
+# real login, from several unrelated ranges including this host's own.
+SSH_PROBE_ADDRESSES = ("10.0.0.5", "172.16.4.9", "192.168.10.7", "203.0.113.9")
+
+_TLS_SUITES = {}  # filled once from the library, see below
+
+
+def _tls_suite_catalogue():
+    """Every pre-TLS 1.3 suite the local library can offer, tagged with the two
+    properties this task grades: an ephemeral key exchange (forward secrecy)
+    and an AEAD cipher.
+
+    Read out of OpenSSL's own metadata rather than written down here, so the
+    check is a statement about suite *properties* and not a denylist that a
+    suite can simply not be on. TLS 1.3 suites (`Kx=any`) are excluded: they
+    are ephemeral and AEAD by construction, and are not selectable through the
+    `-cipher` option anyway.
+    """
+    if _TLS_SUITES:
+        return _TLS_SUITES
+    proc = subprocess.run(["openssl", "ciphers", "-v", "ALL:COMPLEMENTOFALL:@SECLEVEL=0"],
+                          capture_output=True, text=True)
+    catalogue = {}
+    for line in proc.stdout.splitlines():
+        fields = line.split()
+        if len(fields) < 5:
+            continue
+        attrs = dict(f.split("=", 1) for f in fields[1:] if "=" in f)
+        kx, mac = attrs.get("Kx", ""), attrs.get("Mac", "")
+        if kx == "any":
+            continue
+        catalogue[fields[0]] = (kx in ("ECDH", "DH"), mac == "AEAD")
+    _TLS_SUITES.update(catalogue)
+    return catalogue
+
+
+def _weak_suite_offer():
+    """A client offer containing every suite that is *not* both forward-secret
+    and AEAD, at SECLEVEL 0 so the client filters nothing before the server
+    chooses."""
+    catalogue = _tls_suite_catalogue()
+    weak = [name for name, (fs, aead) in catalogue.items() if not (fs and aead)]
+    assert weak, "openssl offered no non-forward-secret/non-AEAD suite to probe with"
+    return ":".join(sorted(weak)) + ":@SECLEVEL=0"
+
+
+def _strong_suite(cipher):
+    """A negotiated suite is strong here iff its key exchange is ephemeral and
+    its cipher is AEAD. TLS 1.3 suites (`TLS_*`) are both by construction."""
+    if not cipher:
+        return False
+    if cipher.startswith("TLS_"):
+        return True
+    fs, aead = _tls_suite_catalogue().get(cipher, (False, False))
+    return fs and aead
+
+
+def _negotiated_cipher(proc):
+    """The suite openssl reports it negotiated, or None if the handshake did not
+    settle on one."""
+    m = re.search(r"Cipher\s*(?:is|:)\s*([A-Za-z0-9_-]+)", proc.stdout)
+    if not m:
+        return None
+    name = m.group(1)
+    return None if name in ("(NONE)", "NONE", "0000") else name
 
 
 def _assert_real_file(path, root):
@@ -130,28 +223,32 @@ def test_ssh_password_auth_disabled(enforce):
 
 
 def test_ssh_password_auth_not_reenabled_per_connection(enforce):
-    """SSH: no Match block may hand password authentication back for the
-    connections that actually happen.
+    """SSH: root login and password authentication must be refused for every
+    client, not merely in the global policy.
 
     `sshd -T` on its own reports the global policy and skips Match blocks
     entirely, so a config that reads as hardened can still accept passwords from
     a whole address range. The policy is re-read here the way sshd resolves it
-    for a real login."""
-    cfg = _sshd_effective("user=lowuser,host=probe.internal,addr=10.0.0.5")
-    assert cfg.get("passwordauthentication") == "no", \
-        ("password authentication is still offered to real connections — a Match "
-         "block re-enables it even though the global policy reads as disabled")
-    assert cfg.get("permitrootlogin") == "no", \
-        "root login is still offered to real connections via a Match block"
+    for a real login, from several unrelated ranges and from this host's own
+    address, so an exemption narrowed to some other range is caught too."""
+    for addr in SSH_PROBE_ADDRESSES + (S.primary_ip(),):
+        cfg = _sshd_effective("user=lowuser,host=probe.internal,addr=%s" % addr)
+        assert cfg.get("passwordauthentication") == "no", \
+            ("password authentication is still offered to connections from %s — a "
+             "Match block re-enables it even though the global policy reads as "
+             "disabled" % addr)
+        assert cfg.get("permitrootlogin") == "no", \
+            "root login is still offered to connections from %s via a Match block" % addr
 
 
 def test_ssh_weak_crypto_removed(enforce):
-    """SSH: no weak cipher/MAC/KEX primitive may remain in the effective config."""
-    cfg = _sshd_effective()
-    blob = " ".join([cfg.get("ciphers", ""), cfg.get("macs", ""),
-                     cfg.get("kexalgorithms", "")]).lower()
-    present = sorted({w for w in WEAK_SSH_CRYPTO
-                      if re.search(r"(^|[,\s])%s($|[,\s])" % re.escape(w), blob)})
+    """SSH: no weak cipher/MAC/KEX primitive may remain in the effective config.
+
+    Graded on the class of each primitive sshd actually offers (CBC, RC4/
+    arcfour, DES/3DES, MD5/RIPEMD/truncated MACs, SHA-1 key exchange) rather
+    than against a fixed list of names, so a weak primitive that nobody thought
+    to enumerate is caught just the same."""
+    present = _weak_ssh_primitives(_sshd_effective())
     assert not present, "weak SSH primitives still offered: %s" % present
 
 
@@ -380,12 +477,31 @@ def test_no_uid0_backdoor_account(enforce):
 
 
 def test_tls_weak_ciphers_rejected(services):
-    """TLS: nginx must refuse legacy / non-forward-secret cipher suites."""
+    """TLS: nginx must negotiate only strong, forward-secret suites — an
+    ephemeral key exchange and an AEAD cipher.
+
+    This grades the stated property rather than a list of suite names. The
+    client offers *every* suite the library knows that is not both
+    forward-secret and AEAD — static RSA/DH key exchange, CBC and SHA-1 suites,
+    3DES, RC4, NULL and export suites alike — at SECLEVEL 0 so nothing is
+    filtered out before nginx chooses. A server that would accept any one of
+    them completes a handshake here and fails. The suite a default modern
+    client actually ends up with is then checked to be strong as well, so
+    "refuse this family" cannot be satisfied by offering a different weak
+    one."""
     _, ready = services
     assert ready["nginx"], "nginx did not start from its configuration"
-    proc = S.openssl_probe("127.0.0.1", 443, ["-tls1_2", "-cipher", WEAK_TLS_CIPHERS])
-    assert not _handshake_ok(proc), \
-        "nginx negotiated a weak cipher from {%s}" % WEAK_TLS_CIPHERS
+    weak = S.openssl_probe("127.0.0.1", 443, ["-tls1_2", "-cipher", _weak_suite_offer()])
+    assert not _handshake_ok(weak), \
+        ("nginx negotiated %s, which is not both forward-secret and AEAD"
+         % (_negotiated_cipher(weak) or "a weak suite"))
+    good = S.openssl_probe("127.0.0.1", 443, [])
+    if _handshake_ok(good):
+        cipher = _negotiated_cipher(good)
+        if cipher is not None:
+            assert _strong_suite(cipher), \
+                ("nginx negotiated %r with a default client, which is not both "
+                 "forward-secret and AEAD" % cipher)
 
 
 def test_app_not_served_over_plaintext_http(services):
@@ -477,11 +593,17 @@ def test_app_roundtrips_through_redis(services):
 
 
 def test_tls_modern_handshake_works(services):
-    """Functionality: a modern TLS client must still complete a handshake."""
+    """Functionality: a modern TLS client must still complete a handshake.
+
+    Either TLS 1.3 or TLS 1.2 satisfies this: restricting nginx to TLS 1.3 only
+    is a legitimate, stronger choice, so the requirement is a modern handshake,
+    not any particular protocol version."""
     _, ready = services
     assert ready["nginx"], "nginx did not start from its configuration"
-    proc = S.openssl_probe("127.0.0.1", 443, ["-tls1_2"])
-    assert _handshake_ok(proc), "modern TLS 1.2 handshake fails against nginx"
+    for version in ("-tls1_3", "-tls1_2"):
+        if _handshake_ok(S.openssl_probe("127.0.0.1", 443, [version])):
+            return
+    raise AssertionError("no modern TLS handshake (1.3 or 1.2) completes against nginx")
 
 
 def test_oncall_can_still_read_log_bundle(enforce):
@@ -585,3 +707,30 @@ def test_maintenance_job_still_produces_output(enforce):
     assert os.path.isfile(bundle), \
         "the maintenance job no longer refreshes the log bundle %s" % bundle
     assert os.path.getsize(bundle) > 0, "the refreshed log bundle is empty"
+
+
+def test_no_stub_or_redirect_stands_in_for_an_artifact(enforce):
+    """The files a run leaves behind cannot be faked by a stub or a redirect
+    dropped in the working directory.
+
+    The two graded artifacts are produced at their own absolute paths under
+    `/var` (`/var/backups/app/last_backup.txt`, `/var/log/ops/bundle.txt`); a
+    real run never writes their basenames anywhere else. So a symlink pointing
+    at some other file, or an empty file, left under the working directory in
+    their name is never a valid substitute for doing the work — it is exactly
+    the redirect/stub the artifacts must not be reducible to (the instruction
+    requires them to be real files in place, not links). Absence is the pass
+    case; only a link or an empty stub standing in their place fails."""
+    roots = {"/app", os.getcwd()}
+    for artifact in ARTIFACTS:
+        for root in sorted(roots):
+            candidate = os.path.join(root, os.path.basename(artifact))
+            if candidate == artifact:
+                continue
+            assert not os.path.islink(candidate), \
+                ("%s is a symlink standing in for the graded artifact %s; the artifact "
+                 "has to be produced for real at its own path" % (candidate, artifact))
+            if os.path.exists(candidate):
+                assert os.path.isfile(candidate) and os.path.getsize(candidate) > 0, \
+                    ("%s is an empty stub standing in for the graded artifact %s"
+                     % (candidate, artifact))

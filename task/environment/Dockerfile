@@ -78,7 +78,8 @@ RUN install -o root -g root -m 0755 /usr/bin/perl /usr/local/bin/opsperl
 # wrapper cron invokes. The vendored copies under /usr/share/ops are what the
 # tooling restores from: host-profile.dist for change control, and the rest of
 # vendor/ for the deploy-integrity pass.
-RUN mkdir -p /opt/ops /etc/ops /usr/share/ops/vendor /usr/local/ops/bin
+RUN mkdir -p /opt/ops /etc/ops /usr/share/ops/vendor /usr/local/ops/bin \
+    && install -d -o root -g maintenance -m 0775 /var/spool/ops
 COPY data/ops/opsd /opt/ops/opsd
 COPY data/ops/maintenance.sh /opt/ops/maintenance.sh
 COPY data/ops/collect-logs.sh /opt/ops/collect-logs.sh

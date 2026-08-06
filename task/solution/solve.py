@@ -104,6 +104,24 @@ def fix_profile_and_enforce():
 
     # The maintenance script itself is world-writable (a root job anyone can
     # rewrite); make it root-owned and non-writable by others.
+    #
+    # It also `cd`s into /var/spool/ops before running `python3 -m opsd`. That
+    # directory is group-writable on purpose -- it is where the on-call rota
+    # leaves notes, and a functionality check requires it to stay that way --
+    # but a Python interpreter searches its working directory ahead of
+    # PYTHONPATH and the standard library, so anyone in the group can drop a
+    # module there and have the root job import it. Nothing about that is a
+    # permission on a file the job executes, so it survives every fix above.
+    # `-P` (equivalently PYTHONSAFEPATH=1) stops the interpreter putting the
+    # working directory on sys.path at all; dropping the `cd` works too.
+    with open(JOB) as fh:
+        wrapper = fh.read()
+    wrapper, n = re.subn(r"(?m)^exec python3 -m opsd apply$",
+                         "exec python3 -P -m opsd apply", wrapper, count=1)
+    assert n == 1, "could not find the interpreter invocation in %s" % JOB
+    with open(JOB, "w") as fh:
+        fh.write(wrapper)
+
     os.chown(JOB, 0, 0)
     os.chmod(JOB, 0o755)
 

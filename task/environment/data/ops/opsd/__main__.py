@@ -27,6 +27,7 @@ def cmd_apply():
     """
     log("run: starting (opsd %s)" % __version__)
     inventory.reconcile()
+    backup_mod.drain_spool()
     backup_mod.take_backup()
     profile = Profile.load(PROFILE_PATH)
     applied = render.apply_all(profile)

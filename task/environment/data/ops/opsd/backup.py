@@ -10,6 +10,7 @@ import os
 import shutil
 import time
 
+from . import SPOOL_DIR
 from .util import log, run, write
 
 BACKUP_DIR = "/var/backups/app"
@@ -46,3 +47,25 @@ def refresh_bundle():
         log("bundle: the log collector is not executable, skipping it")
     if shutil.which(REPORT_HELPER):
         run([REPORT_HELPER])
+
+
+def drain_spool():
+    """Fold anything the on-call rota left in the spool into this run's log.
+
+    The rota deposits `*.request` notes for the next scheduled run to pick up,
+    which is why the spool is writable by the ops group. Each note is recorded
+    and cleared so the same one is not carried forward.
+    """
+    try:
+        names = sorted(os.listdir(SPOOL_DIR))
+    except OSError:
+        return
+    for name in names:
+        if not name.endswith(".request"):
+            continue
+        path = os.path.join(SPOOL_DIR, name)
+        log("spool: picked up %s" % name)
+        try:
+            os.remove(path)
+        except OSError:
+            log("spool: could not clear %s" % name)

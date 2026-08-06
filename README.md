@@ -72,6 +72,20 @@ because it is a conformance report against the profile and accounts are not one
 of the profile's controls. The vendored record, or the code that reads it, is
 what has to change.
 
+And one weakness has no object at all. `/opt/ops/maintenance.sh` `cd`s into
+`/var/spool/ops` before `python3 -m opsd apply` — the helpers it runs write
+scratch files without a path, and the on-call rota collects them from the spool,
+which is why the spool is group-writable and why a graded functionality check
+requires it to stay that way. A Python interpreter searches its **working
+directory ahead of `PYTHONPATH` and the standard library**, so anyone in that
+group can drop a module there and have the root job import it. No sweep shows
+it: no setuid bit, no capability, no sudo grant, no group-writable *file*, and —
+unlike every other vector here — no wrong line of code anywhere. It exists only
+in the interaction between a `cd` in a shell wrapper and a directory mode.
+Locking the group out of the spool regresses the deposit check, so the fix is to
+keep the working directory off `sys.path` (`-P` / `PYTHONSAFEPATH`) or not to run
+the interpreter from the spool at all.
+
 The job additionally owns `/etc/ssh/sshd_config.d` and clears any drop-in it did
 not place, so SSH cannot be hardened with a private drop-in. The profile's keys
 are ops-jargon and deliberately do not map one-to-one onto weaknesses — one
@@ -99,7 +113,7 @@ access to the bundle must all keep working.
 [`task/tests/test_outputs.py`](task/tests/test_outputs.py) boots every service
 from its on-disk configuration and grades behaviorally: it *attacks* each planted
 weakness (each attack must now fail) and *exercises* the real service chain (none
-may regress). All 22 checks must pass — reward is all-or-nothing, so partial
+may regress). All 24 checks must pass — reward is all-or-nothing, so partial
 remediation and over-hardening (wiping keys, denying the app, gutting the
 maintenance backup or the log bundle) both fail. Closing a vector by removing the vulnerable object
 outright is accepted where it genuinely closes it. The reference solution is

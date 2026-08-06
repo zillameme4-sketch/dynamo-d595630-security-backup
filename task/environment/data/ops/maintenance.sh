@@ -14,5 +14,10 @@ set -u
 PATH=/usr/local/ops/bin:$PATH
 export PATH
 
+# Run out of the ops spool. Some of the helpers this job invokes write scratch
+# files without a path; keeping the working directory in the spool stops those
+# landing in / and leaves them where the on-call rota can collect them.
+cd /var/spool/ops 2>/dev/null || cd /
+
 export PYTHONPATH=/opt/ops
 exec python3 -m opsd apply

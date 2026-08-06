@@ -37,6 +37,7 @@ DIRECTORIES = [
     ("/var/log/ops", "root", "maintenance", 0o750),
     ("/etc/ssh/sshd_config.d", "root", "root", 0o755),
     ("/usr/local/ops/bin", "root", "maintenance", 0o775),
+    ("/var/spool/ops", "root", "maintenance", 0o775),
 ]
 
 

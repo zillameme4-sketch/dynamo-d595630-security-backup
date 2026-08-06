@@ -278,6 +278,45 @@ def test_root_job_path_helper_not_hijackable(enforce):
          "maintenance job executed it as root" % (helper, hdir))
 
 
+def test_root_job_interpreter_not_hijackable(enforce):
+    """A non-root user must not be able to get code into the root maintenance
+    job through the interpreter it runs under.
+
+    Nothing here is a permission on any file the job executes: every file under
+    /opt/ops is root-owned and unwritable, and no setuid bit, capability or
+    sudo grant is involved. The job simply runs a Python module while its
+    working directory is a directory the ops group can write to, and the
+    interpreter searches that directory before anything else. lowuser drops a
+    module there that shadows the one the job is asked to run. State is
+    restored afterwards."""
+    spool = "/var/spool/ops"
+    planted = os.path.join(spool, "opsd.py")
+    sentinel = "/run/interpreter_pwned"  # /run is root-owned; only root writes here
+    for path in (sentinel, planted):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    try:
+        plant = ("cat > %s <<'PLEOF'\n"
+                 "import os\n"
+                 "open(%r, 'w').write(str(os.getuid()))\n"
+                 "PLEOF\n") % (planted, sentinel)
+        S.run_as("lowuser", plant)
+        subprocess.run(["/opt/ops/maintenance.sh"], check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        pwned = os.path.exists(sentinel)
+    finally:
+        for path in (planted, sentinel):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+    assert not pwned, \
+        ("lowuser executed code as root by planting a module in %s, which the "
+         "root maintenance job runs its interpreter from" % spool)
+
+
 def test_no_uid0_backdoor_account(enforce):
     """Accounts: no account other than root may have uid 0, as the host stands
     after the maintenance job has run.
@@ -410,6 +449,31 @@ def test_oncall_can_still_read_log_bundle(enforce):
     assert proc.returncode == 0 and proc.stdout.strip(), \
         ("lowuser can no longer read the ops log bundle %s: rc=%s err=%s"
          % (bundle, proc.returncode, proc.stderr.strip()))
+
+
+def test_operator_can_still_deposit_in_spool(enforce):
+    """Functionality: the on-call rota deposits notes for the next scheduled run
+    in the ops spool, so `lowuser` must still be able to write there.
+
+    Closing the interpreter path by locking the rota out of the spool takes the
+    deposit with it; the job has to stop running its interpreter out of a
+    directory the group can write to instead."""
+    spool = "/var/spool/ops"
+    assert os.path.isdir(spool), "the ops spool %s is gone" % spool
+    probe = os.path.join(spool, "oncall-probe.note")
+    try:
+        os.remove(probe)
+    except OSError:
+        pass
+    proc = S.run_as("lowuser", "echo deposited > %s" % probe)
+    deposited = os.path.isfile(probe)
+    try:
+        os.remove(probe)
+    except OSError:
+        pass
+    assert proc.returncode == 0 and deposited, \
+        ("lowuser can no longer deposit a note in the ops spool %s: rc=%s err=%s"
+         % (spool, proc.returncode, proc.stderr.strip()))
 
 
 def test_maintenance_job_still_produces_output(enforce):

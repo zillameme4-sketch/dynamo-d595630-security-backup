@@ -33,5 +33,6 @@ Functionality — none of these may regress:
 - `GET https://127.0.0.1/status` through nginx returns JSON whose `cache` field equals `healthy` (the app must still reach Redis).
 - Running the maintenance job still succeeds: it writes its backup under `/var/backups/app` and refreshes the log bundle at `/var/log/ops/bundle.txt`.
 - `lowuser` can still read `/var/log/ops/bundle.txt`, which it reaches through its secondary group.
+- `lowuser` can still deposit a file in the ops spool directory `/var/spool/ops`, which the on-call rota uses to leave notes for the next scheduled run.
 
 There are no output files to produce: the graded artifact is the resulting state of the host's configuration and files.

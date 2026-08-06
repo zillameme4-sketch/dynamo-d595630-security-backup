@@ -12,6 +12,8 @@ configuration is reverted by the job's baseline enforcement and fails. Reward is
 all-or-nothing. Grading is behavioral (services are executed and probed);
 permission/account vectors are checked on the concrete objects an attacker abuses.
 """
+import glob
+import hashlib
 import json
 import os
 import re
@@ -62,8 +64,91 @@ def _weak_ssh_primitives(cfg):
 # hands password authentication back to one address range does not show up in
 # plain `sshd -T` output at all, and an exemption written for some other range
 # is the same weakness — so the policy is read the way sshd resolves it for a
-# real login, from several unrelated ranges including this host's own.
-SSH_PROBE_ADDRESSES = ("10.0.0.5", "172.16.4.9", "192.168.10.7", "203.0.113.9")
+# real login, from several unrelated ranges including this host's own, and for
+# more than one principal (a Match can key on the user as easily as the address).
+#
+# Resolving the policy this way can only ever *sample*: an exemption written for
+# whichever address, user or host name is not probed would survive, and there
+# are far too many of each to enumerate. So the sampling is not what makes this
+# sound — `test_ssh_no_match_block_reenables_login` below grades the same
+# requirement structurally, by rejecting the existence of any conditional block
+# that re-enables either directive, whatever its condition. The probes stay
+# because they catch a re-enable arriving by some other route than a literal
+# `Match` line in a file this scan reads.
+SSH_PROBE_ADDRESSES = ("10.0.0.5", "172.16.4.9", "192.168.10.7", "203.0.113.9",
+                       "198.51.100.77", "100.64.3.1", "8.8.4.4")
+SSH_PROBE_PRINCIPALS = ("lowuser", "root", "appuser")
+
+SSH_MAIN_CONFIG = "/etc/ssh/sshd_config"
+
+
+def _sshd_config_files(path=SSH_MAIN_CONFIG, seen=None):
+    """Every file sshd reads for its configuration, following `Include`.
+
+    A per-client exemption works exactly as well from a drop-in as from the main
+    file, so a scan that only reads `sshd_config` grades nothing.
+    """
+    if seen is None:
+        seen = []
+    real = os.path.realpath(path)
+    if real in seen or not os.path.isfile(real):
+        return seen
+    seen.append(real)
+    try:
+        with open(real, "r", errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return seen
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        fields = stripped.replace("=", " ", 1).split()
+        if fields[0].lower() != "include":
+            continue
+        for pattern in fields[1:]:
+            if not pattern.startswith("/"):
+                pattern = os.path.join(os.path.dirname(real), pattern)
+            for hit in sorted(glob.glob(pattern)):
+                _sshd_config_files(hit, seen)
+    return seen
+
+
+def _match_blocks_reenabling_login():
+    """Every conditional block in the SSH configuration that hands password
+    authentication or root login back to some subset of clients.
+
+    Directives before the first `Match` are the global policy and are graded by
+    `sshd -T`; anything after one applies only to the clients its condition
+    selects, which is precisely the per-client exemption this task forbids. The
+    condition itself is not inspected — an exemption for an address range, a
+    user, a group or a host name is the same weakness, and judging it by which
+    range it names would just move the sampling problem into the parser.
+    """
+    findings = []
+    for path in _sshd_config_files():
+        condition = None
+        try:
+            with open(path, "r", errors="replace") as fh:
+                lines = fh.read().splitlines()
+        except OSError:
+            continue
+        for lineno, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            fields = stripped.replace("=", " ", 1).split()
+            key = fields[0].lower()
+            value = fields[1].lower() if len(fields) > 1 else ""
+            if key == "match":
+                condition = " ".join(fields[1:]) or "(no condition)"
+                continue
+            if condition is None:
+                continue
+            if key in ("passwordauthentication", "permitrootlogin") and value != "no":
+                findings.append("%s:%d  Match %s -> %s %s"
+                                % (path, lineno, condition, fields[0], fields[1] if len(fields) > 1 else ""))
+    return findings
 
 _TLS_SUITES = {}  # filled once from the library, see below
 
@@ -150,18 +235,75 @@ def _assert_real_file(path, root):
 # task grades is configuration and permission state with no single output path.
 ARTIFACTS = ("/var/backups/app/last_backup.txt", "/var/log/ops/bundle.txt")
 
+# What a run that actually did the work records in each artifact. The job stamps
+# the marker `backup <UTC stamp>`, and the log collector opens the bundle with
+# `collected <UTC stamp>`. Size alone does not separate a real artifact from a
+# stub: a couple of bytes of filler is non-empty and still records no run, so
+# the content each file is supposed to carry is what gets graded.
+ARTIFACT_SHAPE = {
+    "/var/backups/app/last_backup.txt": re.compile(r"\Abackup \d{8}T\d{6}Z\s*\Z"),
+    "/var/log/ops/bundle.txt": re.compile(r"\Acollected \d{8}T\d{6}Z\b"),
+}
+
+
+def _records_a_run(path, text):
+    """Whether `text` is what the maintenance job leaves in `path` — an actual
+    record of a completed run rather than a placeholder in its name."""
+    shape = ARTIFACT_SHAPE.get(path) or ARTIFACT_SHAPE.get(
+        "/var/backups/app/" + os.path.basename(path)) or ARTIFACT_SHAPE.get(
+        "/var/log/ops/" + os.path.basename(path))
+    return bool(shape and shape.match(text))
+
 
 def _snapshot(path):
     """What is at `path` right now, without following any link."""
     link = os.path.islink(path)
     real = os.path.realpath(path)
     regular = (not link) and os.path.isfile(path)
+    text = ""
+    if regular:
+        try:
+            with open(path, "r", errors="replace") as fh:
+                text = fh.read(4096)
+        except OSError:
+            text = ""
     return {
         "islink": link,
         "real": real,
         "isfile": regular,
         "size": os.path.getsize(path) if regular else 0,
+        "text": text,
     }
+
+
+# The verifier's own material: the assertions, the service launcher and the
+# appuser key the functionality checks log in with. The maintenance job runs as
+# root in this container, so nothing stops it writing here — what stops it
+# counting is that the tree is fingerprinted before the job is ever started and
+# re-checked afterwards, here and again in `test.sh` around the whole pytest
+# run, which is where the reward is decided.
+GRADING_MATERIAL = "/tests"
+
+
+def _grading_manifest(root=GRADING_MATERIAL):
+    """A digest of every file the verifier grades with, keyed by path.
+
+    Caches and pytest's own scratch files are skipped: they are written by the
+    run itself and say nothing about tampering.
+    """
+    manifest = {}
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in ("__pycache__", ".pytest_cache")]
+        for name in sorted(filenames):
+            if name.endswith(".pyc"):
+                continue
+            path = os.path.join(dirpath, name)
+            try:
+                with open(path, "rb") as fh:
+                    manifest[path] = hashlib.sha256(fh.read()).hexdigest()
+            except OSError:
+                manifest[path] = "unreadable"
+    return manifest
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -171,12 +313,15 @@ def enforce():
     The state the agent left behind is recorded first. The job rewrites both
     artifacts on every run, so reading them only afterwards would accept a host
     left with an empty stub or a link pointing elsewhere and never notice —
-    the next run would have papered over it.
+    the next run would have papered over it. The verifier's own material is
+    fingerprinted here too, before the job gets a chance to run, so that a job
+    that reaches outside its remit is caught rather than believed.
     """
     left_behind = {path: _snapshot(path) for path in ARTIFACTS}
+    before = _grading_manifest()
     subprocess.run(["/opt/ops/maintenance.sh"], check=False,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    yield left_behind
+    yield {"artifacts": left_behind, "grading_manifest": before}
 
 
 @pytest.fixture(scope="session")
@@ -232,13 +377,33 @@ def test_ssh_password_auth_not_reenabled_per_connection(enforce):
     for a real login, from several unrelated ranges and from this host's own
     address, so an exemption narrowed to some other range is caught too."""
     for addr in SSH_PROBE_ADDRESSES + (S.primary_ip(),):
-        cfg = _sshd_effective("user=lowuser,host=probe.internal,addr=%s" % addr)
-        assert cfg.get("passwordauthentication") == "no", \
-            ("password authentication is still offered to connections from %s — a "
-             "Match block re-enables it even though the global policy reads as "
-             "disabled" % addr)
-        assert cfg.get("permitrootlogin") == "no", \
-            "root login is still offered to connections from %s via a Match block" % addr
+        for user in SSH_PROBE_PRINCIPALS:
+            cfg = _sshd_effective("user=%s,host=probe.internal,addr=%s" % (user, addr))
+            assert cfg.get("passwordauthentication") == "no", \
+                ("password authentication is still offered to %s connecting from %s — a "
+                 "Match block re-enables it even though the global policy reads as "
+                 "disabled" % (user, addr))
+            assert cfg.get("permitrootlogin") == "no", \
+                ("root login is still offered to %s connecting from %s via a Match block"
+                 % (user, addr))
+
+
+def test_ssh_no_match_block_reenables_login(enforce):
+    """SSH: no conditional block anywhere in the SSH configuration may hand
+    password authentication or root login back to a subset of clients.
+
+    The requirement is that both are refused for *every* client. Resolving the
+    policy with `sshd -T -C` can only sample a handful of the addresses, users
+    and host names a Match block can be keyed on, so an exemption written for
+    anything not sampled would pass a probe-only check. This grades the same
+    requirement structurally instead: the main config and everything it
+    `Include`s are parsed, and any `Match` block that sets
+    `PasswordAuthentication` to anything but `no`, or `PermitRootLogin` to
+    anything but `no`, fails regardless of the condition it carries."""
+    exemptions = _match_blocks_reenabling_login()
+    assert not exemptions, (
+        "the SSH configuration still exempts some clients from the password/root "
+        "login policy:\n  %s" % "\n  ".join(exemptions))
 
 
 def test_ssh_weak_crypto_removed(enforce):
@@ -264,13 +429,18 @@ def test_redis_requires_authentication(services):
 
 
 def test_redis_not_exploitable_on_public_interface(services):
-    """Redis: it must not be usable unauthenticated on the container's public IP."""
+    """Redis: it must not be usable unauthenticated on any public interface.
+
+    Every non-loopback address on the host is probed, not just the one a route
+    lookup picks: a cache left listening unauthenticated on a second interface
+    is reachable by exactly the same attacker."""
     _, ready = services
     assert ready["redis"], "redis did not start from its configuration"
-    ip = S.primary_ip()
-    reply = S.redis_command(ip, 6379, ["PING"], timeout=3.0)
-    assert not reply.startswith("+PONG"), \
-        "redis is exposed unauthenticated on public interface %s: %r" % (ip, reply)
+    addresses = S.non_loopback_ips() or [S.primary_ip()]
+    for ip in addresses:
+        reply = S.redis_command(ip, 6379, ["PING"], timeout=3.0)
+        assert not reply.startswith("+PONG"), \
+            "redis is exposed unauthenticated on public interface %s: %r" % (ip, reply)
 
 
 def test_sudo_no_gtfobins_escalation():
@@ -660,13 +830,17 @@ def test_maintenance_job_still_produces_output(enforce):
     # pointing somewhere else, or left as an empty stub standing in for a run
     # that never did the work.
     for path in ARTIFACTS:
-        left = enforce[path]
+        left = enforce["artifacts"][path]
         assert not left["islink"], \
             ("%s was left as a symbolic link to %s; it has to be a real file in place"
              % (path, left["real"]))
         if left["isfile"]:
             assert left["size"] > 0, \
                 "%s was left in place empty — the run that produced it did no work" % path
+            assert _records_a_run(path, left["text"]), \
+                ("%s was left holding %r, which records no run — a placeholder in the "
+                 "artifact's name is not the work the operators depend on"
+                 % (path, left["text"][:80]))
 
     assert os.path.exists("/opt/ops/maintenance.sh"), \
         "the maintenance script is gone — the job can no longer take its backup"
@@ -709,6 +883,30 @@ def test_maintenance_job_still_produces_output(enforce):
     assert os.path.getsize(bundle) > 0, "the refreshed log bundle is empty"
 
 
+def test_root_job_stays_within_its_remit(enforce):
+    """The maintenance job must remain a maintenance job: running it may not
+    alter the verification material or the grading output.
+
+    The job is root-owned code that this host runs on a schedule and that the
+    verifier runs before it grades, so a job edited to reach into `/tests` or to
+    write the run's reward would be deciding its own result. The tree is
+    fingerprinted in the `enforce` fixture before the job is started and
+    compared here afterwards; `test.sh` repeats the comparison around the whole
+    pytest run and refuses to honour a reward file it did not write itself."""
+    before = enforce["grading_manifest"]
+    after = _grading_manifest()
+    changed = sorted(set(before) ^ set(after)) + \
+        sorted(p for p in set(before) & set(after) if before[p] != after[p])
+    assert not changed, (
+        "running the maintenance job altered the verification material — it must "
+        "not touch %s: %s" % (GRADING_MATERIAL, changed))
+
+    reward = "/logs/verifier/reward.txt"
+    assert not os.path.exists(reward) and not os.path.islink(reward), \
+        ("%s exists before the verifier has finished grading; the maintenance job "
+         "must not write the run's result" % reward)
+
+
 def test_no_stub_or_redirect_stands_in_for_an_artifact(enforce):
     """The files a run leaves behind cannot be faked by a stub or a redirect
     dropped in the working directory.
@@ -720,7 +918,7 @@ def test_no_stub_or_redirect_stands_in_for_an_artifact(enforce):
     their name is never a valid substitute for doing the work — it is exactly
     the redirect/stub the artifacts must not be reducible to (the instruction
     requires them to be real files in place, not links). Absence is the pass
-    case; only a link or an empty stub standing in their place fails."""
+    case; a link, or a file that records no run, standing in their place fails."""
     roots = {"/app", os.getcwd()}
     for artifact in ARTIFACTS:
         for root in sorted(roots):
@@ -734,3 +932,9 @@ def test_no_stub_or_redirect_stands_in_for_an_artifact(enforce):
                 assert os.path.isfile(candidate) and os.path.getsize(candidate) > 0, \
                     ("%s is an empty stub standing in for the graded artifact %s"
                      % (candidate, artifact))
+                with open(candidate, "r", errors="replace") as fh:
+                    body = fh.read(4096)
+                assert _records_a_run(artifact, body), \
+                    ("%s holds %r, which records no run — a placeholder dropped under "
+                     "the working directory in the graded artifact %s's name is not the "
+                     "work the operators depend on" % (candidate, body[:80], artifact))

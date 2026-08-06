@@ -21,6 +21,29 @@ def primary_ip():
         s.close()
 
 
+def non_loopback_ips():
+    """Every non-loopback IPv4 address configured on this container.
+
+    `primary_ip()` reports the one address a route lookup happens to pick; a
+    service left listening on a second interface is exposed just the same, so
+    the exposure checks probe all of them.
+    """
+    proc = subprocess.run(["ip", "-4", "-o", "addr", "show"],
+                          capture_output=True, text=True)
+    found = []
+    for line in proc.stdout.splitlines():
+        fields = line.split()
+        if "inet" not in fields:
+            continue
+        addr = fields[fields.index("inet") + 1].split("/")[0]
+        if not addr.startswith("127.") and addr not in found:
+            found.append(addr)
+    primary = primary_ip()
+    if primary != "127.0.0.1" and primary not in found:
+        found.append(primary)
+    return found
+
+
 def _wait_port(host, port, timeout=15.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
